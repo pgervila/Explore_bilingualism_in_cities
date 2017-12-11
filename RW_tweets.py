@@ -20,16 +20,15 @@ class RandomWalkCityTweets:
         and return data on language use """
     
     Kiev_dict = {'KyivOperativ', 'kyivmetroalerts', 'nashkiev', 'auto_kiev', 
-             'Leshchenkos', 'poroshenko', 'Vitaliy_Klychko', 'kievtypical', 
-             'ukrpravda_news', 'HromadskeUA','lb_ua', 'Korrespondent', 
-             'LIGAnet', 'radiosvoboda', '5channel', 'tsnua', 'VWK668', 'Gordonuacom', 'zn_ua',
-             'patrolpoliceua', 'KievRestaurants'}
+                 'Leshchenkos', 'poroshenko', 'Vitaliy_Klychko', 'kievtypical',
+                 'ukrpravda_news', 'HromadskeUA','lb_ua', 'Korrespondent',
+                 'LIGAnet', 'radiosvoboda', '5channel', 'tsnua', 'VWK668', 'Gordonuacom', 'zn_ua',
+                 'patrolpoliceua', 'KievRestaurants'}
     
     Barcelona_dict = {'TMB_Barcelona', 'bcn_ajuntament', 'barcelona_cat', 'LaVanguardia', 'VilaWeb', 
-                  'diariARA', 'elperiodico', 'elperiodico_cat', 'elpuntavui', 'meteocat', 'mossos'}
-    
-    
-    
+                      'diariARA', 'elperiodico', 'elperiodico_cat', 'elpuntavui', 'meteocat', 'mossos',
+                      'sport', 'VilaWeb'}
+
     def __init__(self, data_file_name, city):
         if not os.path.exists(data_file_name):
             open(data_file_name, 'w+').close()
@@ -44,8 +43,7 @@ class RandomWalkCityTweets:
         auth = OAuthHandler(consumer_key, consumer_secret)
         auth.set_access_token(access_token, access_token_secret)
         self.api = tweepy.API(auth, wait_on_rate_limit=True, wait_on_rate_limit_notify=True)
-        
-            
+
     def get_account_network(self, account_name, rel_type='followers', max_num =100,
                             min_num_tweets=0, min_num_followers=0, only_city=False, 
                             limited_search=False, avoid_repeat=None, cursor_on=False):
@@ -61,6 +59,9 @@ class RandomWalkCityTweets:
                     to be included in list
                 * min_num_followers: minimum number of followers a follower needs to have 
                     to be included in list
+                * limited_search:
+                * avoid_repeat:
+                * cursor_on:
             Returns:
                 * list_people: list of account_names
         """
@@ -74,7 +75,7 @@ class RandomWalkCityTweets:
             node = '/'.join(['', self.city, account_name, rel_type])
             df_old = pd.read_hdf(self.data_file_name, node)
             cursor_id = df_old.cursor_id.values[-1]
-            cursor = tweepy.Cursor(api.followers, screen_name=account_name, 
+            cursor = tweepy.Cursor(self.api.followers, screen_name=account_name,
                                       count=200, cursor=cursor_id)
         users = cursor.items(max_num)
         while True:
@@ -101,7 +102,7 @@ class RandomWalkCityTweets:
                 if 'Read timed out' in str(e):
                     print('fallen here')
                     print(e)
-                    time.sleep(5)
+                    time.sleep(3)
                 else:
                     time.sleep(60*16)
                     continue #user = next(users)
@@ -143,8 +144,8 @@ class RandomWalkCityTweets:
                                            '/'.join(['', self.city, 'unique_followers']))
                 
     def load_main_unique_followers(self):
-        """ Load main followers from hdf file and ssign them to class attribute 
-            as pandas Dataframe"""
+        """ Load main followers from hdf file and assign them to class attribute
+            as pandas Dataframe """
         self.df_unique_flws = pd.read_hdf(self.data_file_name, 
                                           '/'.join(['', self.city, 'unique_followers']))
            
@@ -174,7 +175,7 @@ class RandomWalkCityTweets:
                     time.sleep(3)
                     break
                 else:
-                    time.sleep(60*15)
+                    time.sleep(60 * 15)
                     continue 
             except StopIteration:
                 break
@@ -182,7 +183,7 @@ class RandomWalkCityTweets:
 
     def get_tweets_from_accounts(self, list_accounts, max_num_accounts=None, 
                                  max_num_twts=20, save=True, random_walk=False):
-        """ Given a list of accounts, get tweets texts, langs and authors
+        """ Given a list of accounts, get its tweets texts, langs and authors
             All URLs and tweet account names are removed from tweet
             texts since they are not relevant for language identification
         """
@@ -239,6 +240,10 @@ class RandomWalkCityTweets:
         # get tweets from new followers if any
         if new_flws:
             new_twts = self.get_account_tweets(new_flws, save=False)
+            if self.city == 'Barcelona':
+                new_twts['tweets'] = new_twts['tweets'].str.replace(r"RT ", "")
+                new_twts['tweets'] = new_twts['tweets'].str.replace(r"[^\w\s'’,.!?]+", " ")
+                new_twts['lang_detected'] = new_twts['tweets'].apply(self.detect_refined)
             # append new tweets
             availab_tweets = availab_tweets.append(new_twts, ignore_index=True)
             # save
@@ -275,8 +280,28 @@ class RandomWalkCityTweets:
         self.random_walk_tweets = self.get_tweets_from_accounts(self.random_walk_accounts["screen_name"],  
                                                                 max_num_twts=20, save=True, 
                                                                 random_walk=True)
-            
-#     def random_walk(self, regex_words = None):
+
+    def optimize_saving_space(self):
+        with pd.HDFStore(self.data_file_name) as f:
+            for n in f.keys():
+                data = pd.read_hdf(f, n)
+                data.to_hdf('new_city_random_walks.h5', n)
+        os.remove(self.data_file_name)
+        os.rename('new_city_random_walks.h5', self.data_file_name)
+
+    def detect_refined(self, txt):
+        if len(txt.split()) > 2 and len(txt) > 10:
+            try:
+                return detect(txt)
+            except:
+                return 'Undefined'
+        else:
+            return 'Undefined'
+
+
+
+
+        #     def random_walk(self, regex_words = None):
 #         """ 
 #             Select a list of accounts by randomly walking 
 #             all main followers' friends and followers
