@@ -1,15 +1,13 @@
 import os
 import tweepy
 from tweepy import Stream, OAuthHandler, StreamListener
-import json
 import time
-from collections import Counter
 import re
 import pandas as pd
 import numpy as np
 from langdetect import detect
+from langdetect.lang_detect_exception import LangDetectException
 import pyprind
-import deepdish as dd
 
 #import secret codes
 from twitter_pwd import access_token, access_token_secret, consumer_key, consumer_secret
@@ -23,7 +21,7 @@ class RandomWalkCityTweets:
                  'Leshchenkos', 'poroshenko', 'Vitaliy_Klychko', 'kievtypical',
                  'ukrpravda_news', 'HromadskeUA','lb_ua', 'Korrespondent',
                  'LIGAnet', 'radiosvoboda', '5channel', 'tsnua', 'VWK668', 'Gordonuacom', 'zn_ua',
-                 'patrolpoliceua', 'KievRestaurants'}
+                 'patrolpoliceua', 'KievRestaurants', 'ServiceSsu'}
     
     Barcelona_dict = {'TMB_Barcelona', 'bcn_ajuntament', 'barcelona_cat', 'LaVanguardia', 'VilaWeb', 
                       'diariARA', 'elperiodico', 'elperiodico_cat', 'elpuntavui', 'meteocat', 'mossos',
@@ -34,10 +32,13 @@ class RandomWalkCityTweets:
             open(data_file_name, 'w+').close()
         self.data_file_name = data_file_name
         self.city = city
-        self.key_words = {'Barcelona':{'country': ['Catalu'], 
-                                       'city': ['Barcel']}, 
-                          'Kiev':{'country': ['Україна', 'Ukraine', 'Украина'], 
-                                  'city': ['Kiev' ,'Kyiv' , 'Київ' , 'Киев']}}
+        self.key_words = {'Barcelona': {'country': ['Catalu'],
+                                        'city': ['Barcel']},
+                          'Kiev': {'country': ['Україна', 'Ukraine', 'Украина'],
+                                   'city': ['Kiev', 'Kyiv', 'Київ', 'Киев']}}
+
+        self.unique_flws = None
+        self.tweets_from_followers = None
         
         #set_up API
         auth = OAuthHandler(consumer_key, consumer_secret)
@@ -76,7 +77,7 @@ class RandomWalkCityTweets:
             df_old = pd.read_hdf(self.data_file_name, node)
             cursor_id = df_old.cursor_id.values[-1]
             cursor = tweepy.Cursor(self.api.followers, screen_name=account_name,
-                                      count=200, cursor=cursor_id)
+                                   count=200, cursor=cursor_id)
         users = cursor.items(max_num)
         while True:
             try:
@@ -123,33 +124,37 @@ class RandomWalkCityTweets:
                 
         return list_people
     
-    def get_main_unique_followers(self, save=True, min_num_flws_per_acc=50): 
+    def get_main_unique_followers(self, save=True, min_num_flws_per_acc=50,
+                                  min_num_twts_per_acc=60):
         """ Read all followers nodes and compute list of 
             all unique followers for a given city
         """
-        key_words='|'.join(self.key_words[self.city]['city'])
-        #initialize frame
+        filter_words = '|'.join(self.key_words[self.city]['city'])
+        # initialize frame
         df_unique_flws = pd.DataFrame()
         with pd.HDFStore(self.data_file_name) as f:
+            pattern = r"".join([str(self.city), '/\w+', '(/followers)'])
             for n in f.keys():
-                if re.findall(self.city, n) and not re.findall('_followers', n):
+                if re.findall(pattern, n):
                     df = pd.read_hdf(f, n)
                     df = df[(df['followers_count'] > min_num_flws_per_acc) & 
                             (df['statuses_count'] / df['followers_count'] < 30) &
-                            (df['location'].str.contains(key_words))]
+                            (df['location'].str.contains(filter_words)) &
+                            (df['statuses_count'] >= min_num_twts_per_acc) &
+                            (~df['protected'])]
                     df_unique_flws = df_unique_flws.append(df)
-            self.df_unique_flws = df_unique_flws.drop_duplicates('screen_name')
+            self.unique_flws = df_unique_flws.drop_duplicates('screen_name').reset_index()
             if save:
-                self.df_unique_flws.to_hdf(self.data_file_name, 
+                self.unique_flws.to_hdf(self.data_file_name,
                                            '/'.join(['', self.city, 'unique_followers']))
                 
     def load_main_unique_followers(self):
         """ Load main followers from hdf file and assign them to class attribute
             as pandas Dataframe """
-        self.df_unique_flws = pd.read_hdf(self.data_file_name, 
+        self.unique_flws = pd.read_hdf(self.data_file_name,
                                           '/'.join(['', self.city, 'unique_followers']))
            
-    def get_account_tweets(self, account_name, max_num_twts=20):
+    def get_account_tweets(self, id_account, max_num_twts=60):
         """ Given an account name,
             it retrieves a maximum number of tweets written or retweeted by account owner.
             It returns them in a list.
@@ -159,8 +164,8 @@ class RandomWalkCityTweets:
             Returns:
                 * list_tweets: list including info of all retrieved tweets in JSON format"""
         list_tweets = []
-        timeline = tweepy.Cursor(self.api.user_timeline, screen_name=account_name, 
-                                 count=200, include_rts = True).items(max_num_twts)
+        timeline = tweepy.Cursor(self.api.user_timeline, id=id_account,
+                                 count=200, include_rts=True).items(max_num_twts)
         while True:
             try:
                 tw = next(timeline)
@@ -168,11 +173,11 @@ class RandomWalkCityTweets:
             except tweepy.TweepError as e:
                 if '401' in str(e):    
                     print(e)
-                    time.sleep(3)
+                    time.sleep(2)
                     break
                 elif '404' in str(e):
                     print(e)
-                    time.sleep(3)
+                    time.sleep(2)
                     break
                 else:
                     time.sleep(60 * 15)
@@ -181,29 +186,42 @@ class RandomWalkCityTweets:
                 break
         return list_tweets
 
-    def get_tweets_from_accounts(self, list_accounts, max_num_accounts=None, 
-                                 max_num_twts=20, save=True, random_walk=False):
-        """ Given a list of accounts, get its tweets texts, langs and authors
+    def get_tweets_from_followers(self, list_accounts, max_num_accounts=None,
+                                  max_num_twts=60, save=True, random_walk=False):
+        """ Given a list of accounts by id, get its tweets texts, langs and authors
             All URLs and tweet account names are removed from tweet
             texts since they are not relevant for language identification
+
+            * list_accounts:
+            * max_num_accounts:
+            * max_num_tweets:
+            * save:
+            * random_walk:
         """
         pbar = pyprind.ProgBar(len(list_accounts))
         texts_tweets = []
         langs_tweets = []
         authors_tweets = []
+        authors_id_tweets = []
         if max_num_accounts:
             list_accounts = list_accounts[:max_num_accounts]
-        for idx, acc in enumerate(list_accounts):
-            twts = self.get_account_tweets(acc, max_num_twts=max_num_twts)
+        for idx, id_author in enumerate(list_accounts):
+            twts = self.get_account_tweets(id_author, max_num_twts=max_num_twts)
             texts_tweets.extend([re.sub(r"(@\s?[^\s]+|https?://?[^\s]+)", "", tw.text) 
                                  for tw in twts])
             langs_tweets.extend([tw.lang for tw in twts])
-            authors_tweets.extend([acc for _ in twts])
+            authors_id_tweets.extend([id_author for _ in twts])
+            authors_tweets.extend([tw.user.screen_name for tw in twts])
             pbar.update()
-        df_tweets = pd.DataFrame({'tweets':texts_tweets, 
-                                  'lang':langs_tweets, 
-                                  'screen_name':authors_tweets})
-        df_tweets = df_tweets.drop_duplicates('tweets')
+        df_tweets = pd.DataFrame({'tweets': texts_tweets,
+                                  'lang': langs_tweets,
+                                  'screen_name': authors_tweets,
+                                  'id_str': authors_id_tweets})
+        #df_tweets = df_tweets.drop_duplicates('tweets')
+        if self.city == 'Barcelona':
+            df_tweets['tweets'] = df_tweets['tweets'].str.replace(r"RT ", "")
+            df_tweets['tweets'] = df_tweets['tweets'].str.replace(r"[^\w\s'’,.!?]+", " ")
+            df_tweets['lang_detected'] = df_tweets['tweets'].apply(self.detect_refined)
         if save:
             if not random_walk:
                 df_tweets.to_hdf(self.data_file_name, 
@@ -211,56 +229,67 @@ class RandomWalkCityTweets:
             else:
                 with pd.HDFStore('city_random_walks.h5') as f:
                     nodes = f.keys()
-                digits = []
+                ixs_saved_walks = []
                 pattern = r"".join([self.city, "/random_walk_", "(\d+)"])
-                for e in nodes:
+                for n in nodes:
                     try:
-                        digits.append(int(re.findall(pattern, e)[0]))
+                        ixs_saved_walks.append(int(re.findall(pattern, n)[0]))
                     except:
                         continue
-                if not digits:
+                if not ixs_saved_walks:
                     df_tweets.to_hdf(self.data_file_name, 
                                      '/'.join(['', self.city, 'random_walk_1']))
                 else:
-                    i = max(digits) 
+                    i = max(ixs_saved_walks)
                     df_tweets.to_hdf(self.data_file_name, 
-                                     '/'.join(['', self.city, 'random_walk_' + str(i + 1)]))               
-        return df_tweets
+                                     '/'.join(['', self.city, 'random_walk_' + str(i + 1)]))
+        else:
+            return df_tweets
     
-    def update_tweets_from_main_followers(self, download=False):
+    def update_tweets_from_followers(self, download=False):
         """ Download tweets from newly detected followers and append them to saved data"""
         # get sets
         self.get_main_unique_followers(save=True)
-        all_flws = set(self.df_unique_flws.screen_name)
-        availab_tweets = pd.read_hdf(self.data_file_name, 
-                                     '/'.join(['', self.city, 'tweets_from_followers']))
-        flws_with_twts = set(availab_tweets.screen_name)
-        # compute set difference
-        new_flws = all_flws.difference(flws_with_twts)
-        # get tweets from new followers if any
-        if new_flws:
-            new_twts = self.get_account_tweets(new_flws, save=False)
-            if self.city == 'Barcelona':
-                new_twts['tweets'] = new_twts['tweets'].str.replace(r"RT ", "")
-                new_twts['tweets'] = new_twts['tweets'].str.replace(r"[^\w\s'’,.!?]+", " ")
-                new_twts['lang_detected'] = new_twts['tweets'].apply(self.detect_refined)
-            # append new tweets
-            availab_tweets = availab_tweets.append(new_twts, ignore_index=True)
-            # save
-            availab_tweets.to_hdf(self.data_file_name,
-                                  '/'.join(['', self.city, 'tweets_from_followers']))
-            
+        all_flws = set(self.unique_flws.id_str)
+        try:
+            saved_tweets = pd.read_hdf(self.data_file_name,
+                                       '/'.join(['', self.city, 'tweets_from_followers']))
+        except KeyError:
+            saved_tweets = None
+        if saved_tweets:
+            flws_with_twts = set(saved_tweets.id_str)
+            # compute set difference
+            new_flws = all_flws.difference(flws_with_twts)
+            # get tweets from new followers if any
+            if new_flws:
+                new_twts = self.get_tweets_from_followers(new_flws, save=False)
+                # append new tweets
+                saved_tweets = saved_tweets.append(new_twts, ignore_index=True)
+                # save
+                saved_tweets.to_hdf(self.data_file_name,
+                                    '/'.join(['', self.city, 'tweets_from_followers']))
+        else:
+            self.get_tweets_from_followers(all_flws, save=True)
+
+    def load_tweets_from_followers(self):
+        tff = pd.read_hdf(self.data_file_name,
+                          '/'.join(['', self.city, 'tweets_from_followers']))
+        if self.city == 'Barcelona':
+            tff = tff[~((tff.lang == 'und') & (tff.lang_detected != 'ca'))]
+            tff = tff[~((tff.lang == 'es') & (tff.lang_detected != 'es'))]
+
+        self.tweets_from_followers = tff
+
     def random_walk(self):
         """ 
             Select a list of accounts by randomly walking 
             all main followers' friends and followers
-        """        
-        
+        """
         # load main followers
         self.load_main_unique_followers()
         
         # get random sample from main followers
-        sample = np.random.choice(self.df_unique_flws['screen_name'], 10, replace=False)
+        sample = np.random.choice(self.unique_flws['screen_name'], 10, replace=False)
         
         # get a random follower and friend from each account from sample 
         # ( check they do not belong to already met accounts and main followers !!)
@@ -277,9 +306,9 @@ class RandomWalkCityTweets:
             all_flws.extend(list_flws)
         self.random_walk_accounts = pd.DataFrame(all_flws)
         print('starting to retrieve tweets')
-        self.random_walk_tweets = self.get_tweets_from_accounts(self.random_walk_accounts["screen_name"],  
-                                                                max_num_twts=20, save=True, 
-                                                                random_walk=True)
+        self.get_tweets_from_followers(self.random_walk_accounts["id_str"],
+                                       max_num_twts=20, save=True,
+                                       random_walk=True)
 
     def optimize_saving_space(self):
         with pd.HDFStore(self.data_file_name) as f:
@@ -293,10 +322,19 @@ class RandomWalkCityTweets:
         if len(txt.split()) > 2 and len(txt) > 10:
             try:
                 return detect(txt)
-            except:
+            except LangDetectException:
                 return 'Undefined'
         else:
             return 'Undefined'
+
+    def get_num_flws_per_main_acc(self):
+        num_flws_Bcn_accs = {}
+        for acc in self.Barcelona_dict:
+            user_info = self.api.get_user(acc)
+            num_flws_Bcn_accs.update({acc: user_info.followers_count})
+        num_flws_Bcn_accs = pd.Series(num_flws_Bcn_accs)
+        node = "/".join(['', self.city, 'num_flws_main_accs'])
+        num_flws_Bcn_accs.to_hdf(self.data_file_name, node)
 
 
 
