@@ -8,6 +8,7 @@ import numpy as np
 from langdetect import detect
 from langdetect.lang_detect_exception import LangDetectException
 import pyprind
+from collections import defaultdict
 
 #import secret codes
 from twitter_pwd import access_token, access_token_secret, consumer_key, consumer_secret
@@ -45,6 +46,8 @@ class RandomWalkCityTweets:
 
         self.unique_flws = None
         self.tweets_from_followers = None
+        self.av_nodes = None
+        self.data_stats = pd.DataFrame()
         
         #set_up API
         auth = OAuthHandler(consumer_key, consumer_secret)
@@ -389,41 +392,104 @@ class RandomWalkCityTweets:
         node = "/".join(['', self.city, 'num_flws_main_accs'])
         num_flws_per_acc.to_hdf(self.data_file_name, node)
 
+    def process_data(self, min_num_tweets_for_stats=40):
+        """ Method to postprocess tweet data and create a pandas dataframe
+            that summarizes all information
+        """
+        langs_selected = self.langs_for_postprocess[self.city]
+        self.load_tweets_from_followers()
+        tff = self.tweets_from_followers
+        pivtab = tff.pivot_table(aggfunc={'lang': 'count'},
+                                 index=['id_str', 'screen_name'],
+                                 columns='lang_detected').fillna(0.)
+        # keep only accounts with more than 40 relevant tweets for statistical significance
+        self.data_stats = pivtab[pivtab.lang[langs_selected].sum(axis=1) >=
+                                 min_num_tweets_for_stats].lang.reset_index()
+
+        self.data_stats = self.data_stats[['id_str', 'screen_name'] + langs_selected]
+        self.data_stats['tot_lang_counts'] = self.data_stats[langs_selected].sum(axis=1)
+        # get nodes with available tweets
+        self.get_available_nodes()
+        # generate boolean columns with followers for each account
+        for root_acc in self.av_nodes:
+            root_acc_ids = pd.read_hdf(self.data_file_name,
+                                       '/'.join(['', self.city, root_acc, 'followers'])).id_str
+            self.data_stats[root_acc] = self.data_stats.id_str.isin(root_acc_ids)
+
+        for lang in self.langs_for_postprocess[self.city][:2]:
+            mean = lang + '_mean'
+            SE = lang + '_SE'
+            self.data_stats[mean] = self.data_stats[lang] / self.data_stats['tot_lang_counts']
+            self.data_stats[SE] = (np.sqrt(self.data_stats[mean] * (1 - self.data_stats[mean]) /
+                                            self.data_stats['tot_lang_counts']))
+
+    def get_stats_per_root_acc(self):
+        data_frames_per_lang = dict()
+        if self.data_stats.empty:
+            self.process_data()
+
+        lang_1, lang_2 = self.langs_for_postprocess[self.city][:2]
+        for lang in [lang_1, lang_2]:
+            self.stats_per_root_acc = dict()
+            mean = lang + '_mean'
+            median = lang + '_median'
+            std = lang + '_std'
+            SE = lang + '_SE'
+            for root_acc in self.av_nodes:
+                data = self.data_stats[self.data_stats[root_acc]]
+                if data.shape[0] > 50:
+                        self.stats_per_root_acc[root_acc] = {mean: 100 * data[mean].mean(),
+                                                             median: 100 * data[mean].median(),
+                                                             std: 100 * data[mean].std(),
+                                                             SE: 100 * np.sqrt((data[SE] ** 2).sum()) / data.shape[0] }
+            data_frames_per_lang[lang] = pd.DataFrame(self.stats_per_root_acc).transpose()
+
+        self.stats_per_root_acc = data_frames_per_lang[lang_1].join(data_frames_per_lang[lang_2])
+
+    def get_lang_settings_stats_per_root_acc(self):
+        """ Find distribution of lang settings in Twitter account
+            for each account and for users residents in the city only"""
+        self.lang_settings_per_root_acc = defaultdict(dict)
+        if not self.av_nodes:
+            self.get_available_nodes()
+        for root_acc in self.av_nodes:
+            node = "/".join([self.city, root_acc, 'followers'])
+            df = pd.read_hdf('city_random_walks.h5', node)
+            df = df[df.location.str.contains("|".join(self.key_words[self.city]['city']))]
+            counts = df.lang.value_counts()
+
+            sample_means = counts / counts.sum()
+            self.lang_settings_per_root_acc[root_acc] = {'num_accs': df.shape[0]}
+
+            for lang in self.langs_for_postprocess[self.city][:2]:
+                mean_str = lang + '_mean'
+                std_str = lang + '_SE'
+                sample_mean = sample_means[lang]
+                self.lang_settings_per_root_acc[root_acc][mean_str] = 100 * sample_mean
+                self.lang_settings_per_root_acc[root_acc][std_str] = 100 * np.sqrt(sample_mean * (1 - sample_mean) /
+                                                                                   df.shape[0])
+        self.lang_settings_per_root_acc = pd.DataFrame(self.lang_settings_per_root_acc).transpose()
+
+    def print_num_flws_per_root_acc(self):
+        for acc in self.av_nodes:
+            print(acc, self.data_stats[self.data_stats[acc]].shape[0] )
 
 
 
-        #     def random_walk(self, regex_words = None):
-#         """ 
-#             Select a list of accounts by randomly walking 
-#             all main followers' friends and followers
-#         """
-#         main_flws = []
-#         with pd.HDFStore(self.data_file_name) as f:
-#             for n in f.keys():
-#                 if re.findall( r"followers", n):
-#                     flws = pd.read_hdf(self.data_file_name, n)
-#                     #####
-#                     idx = [i for i, w in enumerate(key_words) 
-#                            if re.findall(city, w)][0]
-#                     regex_ words  ="|".join(key_words[idx:])
-#                     try:
-#                         min_people = 50
-#                         flws = flws[
-#                                     (flws['friends_count'] > 50) & 
-#                                     (flws['followers_count'] > 50) &
-#                                     (flws['location'].str.contains(regex_ words)) &
-#                                     (flws['lang'].isin(['ru', 'uk']))
-#                                    ]
-#                     except 
-#                     flws = flws['screen_name'].sample(50).unique().tolist()
-#                     main_flws.extend(flws)
-#         main_flws = set(main_flws)
-        
-#         sub_flws = []
-#         for acc in main_flws:
-#             for rel in ['friends', 'followers']:
-#                 sub_flws.extend(self.get_account_network(
-#                         acc, rel_type=rel, max_num=3000, 
-#                         regex_ words=key_words)
-#                                )
-            
+class PostprocessTweetData:
+    def __init__(self, data_file_name, city):
+        pass
+
+
+    def get_num_relevant_flws_per_acc(self):
+        self.relevant_flws_per_acc = dict()
+        for acc in self.av_nodes:
+            self.relevant_flws_per_acc[acc] = self.data_stats[self.data_stats[acc]].shape[0]
+
+
+
+class PlotTweetData:
+    def __init__(self):
+        pass
+
+
