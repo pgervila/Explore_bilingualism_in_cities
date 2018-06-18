@@ -2,10 +2,12 @@ import os
 import time
 import re
 from collections import defaultdict
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
+# Twitter API for python
 import tweepy
 from tweepy import Stream, OAuthHandler, StreamListener
 # import secret codes to access Twitter API
@@ -44,24 +46,55 @@ class RandomWalkCityTweets:
     city_root_accounts['Brussels'] = {'STIBMIVB':'B'}
     city_root_accounts['Riga'] = {'Rigassatiksme_', 'nilsusakovs'}
 
+    key_words = {'Barcelona': {'country': ['Catalu'], 'city': ['Barcel']},
+                 'Kiev': {'country': ['Україна', 'Ukraine', 'Украина'],
+                           'city': ['Kiev', 'Kyiv', 'Київ', 'Киев']},
+                 'Brussels': {'country': ['Belg'], 'city': ['Bruxel', 'Brussel']},
+                 'Riga': {'country': ['Latvija', 'Латвия', 'Latvia'],
+                           'city': ['Rīg', 'Rig', 'Рига']}
+                }
+
     langs_for_postprocess = {'Kiev': ['uk', 'ru', 'en'], 'Barcelona': ['ca', 'es', 'en'],
                              'Brussels': ['fr', 'nl', 'en', 'es', 'it', 'de', 'tr', 'pt', 'el', 'da', 'ar'],
                              'Riga': ['lv', 'ru', 'en']}
 
-    def __init__(self, data_file_name, city, update=False):
+    def __init__(self, data_file_name, city, city_accounts=None, city_key_words=None, update=False, city_langs=False):
+        """ Args:
+                * data_file_name: string. Name of database file where data is stored from previous computations.
+                    If file name is not found in current directory, a new empty file is created with
+                    the same specified name
+                * city: string. Name of city where bilingualism is to be analyzed
+                * city_accounts: set of strings. Strings are Twitter accounts related to city
+                * city_key_words: list of strings. Strings are expresisons
+                    to recognize the city in different languages or spellings
+                * city_langs: list of strings. Strings must be valid identifiers of languages.
+                    Use reference https://en.wikipedia.org/wiki/List_of_ISO_639-2_codes
+                * update: boolean. True if new data is available in database and 'process_data' needs to be called
+                    to create a pandas DataFrame that summarizes all information. Default False
+        """
         if not os.path.exists(data_file_name):
             open(data_file_name, 'w+').close()
 
         # initialize key arguments
         self.data_file_name = data_file_name
-        self.city = city
-        self.key_words = {'Barcelona': {'country': ['Catalu'], 'city': ['Barcel']},
-                          'Kiev': {'country': ['Україна', 'Ukraine', 'Украина'],
-                                   'city': ['Kiev', 'Kyiv', 'Київ', 'Киев']},
-                          'Brussels': {'country': ['Belg'], 'city': ['Bruxel', 'Brussel']},
-                          'Riga': {'country': ['Latvija', 'Латвия', 'Latvia'],
-                                   'city': ['Rīg', 'Rig', 'Рига']}
-                          }
+        if city in self.city_root_accounts:
+            self.city = city
+        else:
+            if city_accounts:
+                self.city_root_accounts[city] = city_accounts
+            else:
+                raise Exception ("If a new city is specified, root accounts for this city "
+                                 "must be provided through 'city_accounts' argument ")
+            if city_key_words:
+                self.key_words[city] = {'city': city_key_words}
+            else:
+                raise Exception (" If a new city is specified, 'city_key_words' arg must be specified  ")
+            if city_langs:
+                self.langs_for_postprocess[city] = city_langs
+            else:
+                raise Exception (" If a new city is specified, 'city_langs' arg must be specified ")
+
+        # initialize instance attributes
         self.unique_flws = None
         self.tweets_from_followers = None
         self.av_nodes = None
@@ -69,7 +102,7 @@ class RandomWalkCityTweets:
         self.lang_settings_per_root_acc = defaultdict(dict)
         self.stats_per_root_acc = dict()
 
-        # set_up API
+        # set_up Twitter API
         auth = OAuthHandler(consumer_key, consumer_secret)
         auth.set_access_token(access_token, access_token_secret)
         self.api = tweepy.API(auth, wait_on_rate_limit=True, wait_on_rate_limit_notify=True)
@@ -80,28 +113,16 @@ class RandomWalkCityTweets:
             self.data_stats = pd.read_json(self.city + '_data_stats.json')
             self.get_available_nodes()
 
-    def get_available_nodes(self):
-        """ Method to load all nodes available in saved database.
-            Output:
-                * Resulting nodes will be saved as an instance attribute in self.av_nodes
-        """
-        with pd.HDFStore(self.data_file_name) as f:
-            self.av_nodes = []
-            pattern = r"".join([self.city, '/(\w+)', '/followers'])
-            for n in f.keys():
-                acc = re.findall(pattern, n)
-                if acc:
-                    self.av_nodes.append(acc[0])
-
-    def get_account_network(self, account_name, rel_type='followers', max_num =100,
+    def get_account_network(self, root_account_name, rel_type='followers', max_num=100,
                             min_num_tweets=60, min_num_followers=50, only_city=False,
                             limited_search=False, avoid_repeat=None, cursor_on=False,
                             overwrite=False):
-        """ Given an account by its account_name,
-            find users that are linked to it via a specified relation type 'rel_type'.
+        """ Given an account by its account_name, find users that are linked to it
+            via a specified relation type 'rel_type'.
             Args:
-                * account_name: string. Twitter account name
-                * rel_type: string. Specifies relation type (default is 'followers')
+                * root_account_name: string. Twitter account name
+                * rel_type: string. Specifies relation type (default is 'followers',
+                    alternative value is 'friends')
                 * max_num: integer. Maximum number of 'related' users considered
                 * key_words: list of strings. Used to filter retrieved users by location,
                     if specified
@@ -109,7 +130,9 @@ class RandomWalkCityTweets:
                     in order to be included in the list
                 * min_num_followers: minimum number of followers a related-user needs to have
                     in order to be included in the list
-                * limited_search:
+                * only_city: boolean. True if only followers that are also city residents need to be taken into account.
+                    If False, also country-wide residents ( not necessarily city-residents ) will be considered
+                * limited_search: boolean. True .Defaults to False
                 * avoid_repeat: list of strings. List of accounts that do not have to be added
                 * cursor_on: boolean. Set to True if computation needs restart from an
                     intermediate point ( to avoid starting from beginning again )
@@ -121,13 +144,13 @@ class RandomWalkCityTweets:
         list_users = []
         # very important to set count=200 MAX VALUE -> Max 3000 accounts per 15 minutes interval
         if not cursor_on:
-            cursor = tweepy.Cursor(getattr(self.api, rel_type, 0), 
-                                   screen_name=account_name, count=200)
+            cursor = tweepy.Cursor(getattr(self.api, rel_type, 0),
+                                   screen_name=root_account_name, count=200)
         else:
-            node = '/'.join(['', self.city, account_name, rel_type])
+            node = '/'.join(['', self.city, root_account_name, rel_type])
             df_old = pd.read_hdf(self.data_file_name, node)
             cursor_id = df_old.cursor_id.values[-1]
-            cursor = tweepy.Cursor(self.api.followers, screen_name=account_name,
+            cursor = tweepy.Cursor(self.api.followers, screen_name=root_account_name,
                                    count=200, cursor=cursor_id)
         users = cursor.items(max_num)
         while True:
@@ -161,10 +184,10 @@ class RandomWalkCityTweets:
             except StopIteration:
                 break
             tmp_flws = pd.DataFrame(list_users)
-            tmp_flws.to_pickle('_'.join(['tmp_flws', account_name]))
+            tmp_flws.to_pickle('_'.join(['tmp_flws', root_account_name]))
             pbar.update()
         if not limited_search:
-            node = '/'.join(['', self.city, account_name, rel_type])
+            node = '/'.join(['', self.city, root_account_name, rel_type])
             df_new = pd.DataFrame(list_users)
             if not cursor_on:
                 with pd.HDFStore(self.data_file_name) as f:
@@ -175,58 +198,13 @@ class RandomWalkCityTweets:
                         if overwrite:
                             df_new.to_hdf(self.data_file_name, node)
                         else:
-                            df_new.to_pickle('_'.join(['tmp_flws', account_name]))
+                            df_new.to_pickle('_'.join(['tmp_flws', root_account_name]))
             else:
                 df_old = df_old.append(df_new, ignore_index=True)
                 df_old.to_hdf(self.data_file_name, node)
                 
         return list_users
-    
-    def select_root_accs_unique_followers(self, save=True, min_num_flws_per_acc=50,
-                                          min_num_twts_per_acc=60, twts_to_flws_ratio=30):
-        """
-            Method to read followers from all already-computed root-account nodes and
-            then compute a list of all unique followers for a given city
-            Args:
-                * save: boolean. If True, followers are saved to hdf file. Default True
-                * min_num_flws_per_acc: integer. Minimum number of followers an account
-                    needs to have in order to consider it relevant. Default 50
-                * min_num_twts_per_acc: integer. Minimum number of times an account
-                    needs to have tweeted in order to consider it relevant. Default 60
-                * twts_to_flws_ratio: integer. Maximum allowed ratio of the number of tweets
-                    published by account to the number of followers the account has. Defaults to 30
-            Output:
-                * Unique followers are stored in instance attribute self.unique_flws. If requested,
-                    they are also saved to '/unique_followers' name
-        """
-        filter_words = '|'.join(self.key_words[self.city]['city'])
-        # initialize frame
-        df_unique_flws = pd.DataFrame()
-        with pd.HDFStore(self.data_file_name) as f:
-            pattern = r"".join([str(self.city), '/\w+', '(/followers)'])
-            for n in f.keys():
-                if re.findall(pattern, n):
-                    df = pd.read_hdf(f, n)
-                    df = df[(df['followers_count'] > min_num_flws_per_acc) & 
-                            (df['statuses_count'] / df['followers_count'] < twts_to_flws_ratio) &
-                            (df['location'].str.contains(filter_words)) &
-                            (df['statuses_count'] >= min_num_twts_per_acc) &
-                            (~df['protected'])]
-                    df_unique_flws = df_unique_flws.append(df)
-            self.unique_flws = df_unique_flws.drop_duplicates('id_str').reset_index()
-            if save:
-                self.unique_flws.to_hdf(self.data_file_name,
-                                        '/'.join(['', self.city, 'unique_followers']))
-                
-    def load_root_accs_unique_followers(self):
-        """ Load main followers from hdf file and assign them to class attribute
-            as a pandas Dataframe object
-            Output:
-                * Unique followers are saved to self.unique_flws instance attribute
-        """
-        self.unique_flws = pd.read_hdf(self.data_file_name,
-                                       '/'.join(['', self.city, 'unique_followers']))
-           
+
     def get_account_tweets(self, id_account, max_num_twts=60):
         """ Given an account id,
             method retrieves a specified maximum number of tweets written or retweeted by account owner.
@@ -244,7 +222,7 @@ class RandomWalkCityTweets:
                 tw = next(timeline)
                 list_tweets.append(tw)
             except tweepy.TweepError as e:
-                if '401' in str(e):    
+                if '401' in str(e):
                     print(e)
                     time.sleep(2)
                     break
@@ -254,7 +232,7 @@ class RandomWalkCityTweets:
                     break
                 else:
                     time.sleep(60 * 15)
-                    continue 
+                    continue
             except StopIteration:
                 break
         return list_tweets
@@ -277,16 +255,13 @@ class RandomWalkCityTweets:
                 from accounts that do not belong to unique root-account followers. Default False
         """
         pbar = pyprind.ProgBar(len(list_accounts))
-        texts_tweets = []
-        langs_tweets = []
-        authors_tweets = []
-        authors_id_tweets = []
-        temp_df = pd.DataFrame()
+        texts_tweets, langs_tweets, authors_tweets, authors_id_tweets = [], [], [], []
+
         if max_num_accounts:
             list_accounts = list_accounts[:max_num_accounts]
         for idx, id_author in enumerate(list_accounts):
             twts = self.get_account_tweets(id_author, max_num_twts=max_num_twts)
-            texts_tweets.extend([re.sub(r"(@\s?[^\s]+|https?://?[^\s]+)", "", tw.text) 
+            texts_tweets.extend([re.sub(r"(@\s?[^\s]+|https?://?[^\s]+)", "", tw.text)
                                  for tw in twts])
             langs_tweets.extend([tw.lang for tw in twts])
             authors_id_tweets.extend([id_author for _ in twts])
@@ -313,7 +288,7 @@ class RandomWalkCityTweets:
 
         if save:
             if not random_walk:
-                df_tweets.to_hdf(self.data_file_name, 
+                df_tweets.to_hdf(self.data_file_name,
                                  '/'.join(['', self.city, 'tweets_from_followers']))
             else:
                 with pd.HDFStore('city_random_walks.h5') as f:
@@ -326,19 +301,90 @@ class RandomWalkCityTweets:
                     except:
                         continue
                 if not ixs_saved_walks:
-                    df_tweets.to_hdf(self.data_file_name, 
+                    df_tweets.to_hdf(self.data_file_name,
                                      '/'.join(['', self.city, 'random_walk_1']))
                 else:
                     i = max(ixs_saved_walks)
-                    df_tweets.to_hdf(self.data_file_name, 
+                    df_tweets.to_hdf(self.data_file_name,
                                      '/'.join(['', self.city, 'random_walk_' + str(i + 1)]))
         else:
             return df_tweets
+
+    def get_proportion_of_residents(self, root_account):
+        """
+            Method to quantify proportion of root account followers
+            that are explicit city residents
+            Args:
+                * root_account:
+        """
+        locs = '|'.join(self.key_words[self.city]['city'])
+        self.get_account_network(root_account)
+        # TODO : how to store proportion per account until all props are available ??
     
+    def filter_root_accs_unique_followers(self, save=True, min_num_flws_per_acc=50,
+                                          min_num_twts_per_acc=60, twts_to_flws_ratio=30):
+        """
+            Method to read followers from all already-computed root-account nodes and
+            then compute a list of all unique followers for a given city
+            Args:
+                * save: boolean. If True, followers are saved to hdf file. Default True
+                * min_num_flws_per_acc: integer. Minimum number of followers an account
+                    needs to have in order to consider it relevant. Default 50
+                * min_num_twts_per_acc: integer. Minimum number of times an account
+                    needs to have tweeted in order to consider it relevant. Default 60
+                * twts_to_flws_ratio: integer. Maximum allowed ratio of the number of tweets
+                    published by account to the number of followers the account has.
+                    This ratio is a measure of impact. Defaults to 30
+            Output:
+                * Unique followers are stored in instance attribute self.unique_flws. If requested,
+                    they are also saved to '/unique_followers' name
+        """
+        filter_words = '|'.join(self.key_words[self.city]['city'])
+        # initialize frame
+        df_unique_flws = pd.DataFrame()
+        with pd.HDFStore(self.data_file_name) as f:
+            pattern = r"".join([str(self.city), '/\w+', '(/followers)'])
+            for n in f.keys():
+                if re.findall(pattern, n):
+                    df = pd.read_hdf(f, n)
+                    df = df[(df['followers_count'] > min_num_flws_per_acc) & 
+                            (df['statuses_count'] / df['followers_count'] < twts_to_flws_ratio) &
+                            (df['location'].str.contains(filter_words)) &
+                            (df['statuses_count'] >= min_num_twts_per_acc) &
+                            (~df['protected'])]
+                    df_unique_flws = df_unique_flws.append(df)
+            self.unique_flws = df_unique_flws.drop_duplicates('id_str').reset_index()
+            if save:
+                self.unique_flws.to_hdf(self.data_file_name,
+                                        '/'.join(['', self.city, 'unique_followers']))
+                
+    def load_root_accs_unique_followers(self):
+        """
+            Load all root accounts' unique followers from hdf file and assign them to class attribute
+            as a pandas Dataframe object
+            Output:
+                * Unique followers are saved to self.unique_flws instance attribute
+        """
+        self.unique_flws = pd.read_hdf(self.data_file_name,
+                                       '/'.join(['', self.city, 'unique_followers']))
+
+    def get_available_nodes(self):
+        """ Method to load all nodes available in saved database.
+            Output:
+                * Resulting nodes will be saved as an instance attribute in self.av_nodes
+        """
+        with pd.HDFStore(self.data_file_name) as f:
+            self.av_nodes = []
+            pattern = r"".join([self.city, '/(\w+)', '/followers'])
+            for n in f.keys():
+                acc = re.findall(pattern, n)
+                if acc and acc[0] in self.city_root_accounts[self.city]:
+                    self.av_nodes.append(acc[0])
+
     def update_tweets_from_followers(self):
         """ Download tweets from newly detected followers and append them to saved data """
         # get sets
-        self.select_root_accs_unique_followers(save=True)
+        self.filter_root_accs_unique_followers(save=True)
         all_flws = set(self.unique_flws.id_str)
         try:
             saved_tweets = pd.read_hdf(self.data_file_name,
@@ -404,7 +450,7 @@ class RandomWalkCityTweets:
 
     def optimize_saving_space(self):
         """
-            Rewrite hdf data file in order to optimize file size.
+            Method to rewrite hdf data file in order to optimize file size.
             It keeps original file name
         """
         with pd.HDFStore(self.data_file_name) as f:
@@ -430,7 +476,8 @@ class RandomWalkCityTweets:
             return 'Undefined'
 
     def get_num_flws_per_city_acc(self):
-        """ Get number of followers per each account of a given city
+        """
+            Get number of followers per each account of a given city
             Args:
                 * city : string. Name of the city
             Output:
@@ -447,7 +494,7 @@ class RandomWalkCityTweets:
 
     def process_data(self, num_tweets_for_stats=40, save=True):
         """
-            Method to postprocess tweet data and create a pandas dataframe
+            Method to post-process tweet data and create a pandas DataFrame
             that summarizes all information
 
             Arguments:
@@ -509,7 +556,7 @@ class RandomWalkCityTweets:
         """
         if load_data:
             try:
-                self.stats_per_root_acc = pd.read_json(self.city + 'stats_per_root_acc.json')
+                self.stats_per_root_acc = pd.read_json(self.city + '_stats_per_root_acc.json')
             except ValueError:
                 print('data file is not available in current directory')
         else:
@@ -534,7 +581,7 @@ class RandomWalkCityTweets:
         """ Find distribution of lang settings for each root account
             and , if requested, for users residents in the city only
             Args:
-                * city_only: boolean. True if settings have to retrieved only for users from class instance city
+                * city_only: boolean. True if settings have to be retrieved only for users from class instance city
                     Default True
             Output:
                 * sets value to instance attribute 'lang_settings_per_root_acc'
@@ -568,13 +615,17 @@ class RandomWalkCityTweets:
         self.lang_settings_per_root_acc = pd.concat(stats_per_lang, axis=1)
 
     def get_sample_size_per_root_acc(self, print_sizes=False):
-        """ """
+        """ Method to read number of relevant followers per account
+            for statistic analysis
+            Args:
+                * print_sizes: boolean. False if no printing of results is required
+        """
         if not self.av_nodes:
             self.get_available_nodes()
         if self.data_stats.empty:
             try:
                 self.data_stats = pd.read_json(self.city + '_data_stats.json')
-            except:
+            except ValueError:
                 print('Requested file is not in current directory !')
 
         self.sample_size_per_root_acc = {acc: self.data_stats[self.data_stats[acc]].shape[0]
@@ -595,7 +646,8 @@ class RandomWalkCityTweets:
         return len(s_int) / len(s_ref)
 
     def plot_lang_settings_comparison(self, min_num_accs=200, max_num_langs=3, single_account=False):
-        """ Method to plot
+        """
+            Method to visualize statistics on language settings in accounts from followers of root accounts
             Args:
                 * min_num_accs: integer. Minimum number of available followers per root account
                     to consider statistics for it as relevant
@@ -611,6 +663,8 @@ class RandomWalkCityTweets:
         bar_width = 0.4
         colors = ['green', 'blue', 'red', 'yellow', 'orange']
 
+        mpl.style.use('seaborn')
+
         fig, ax = plt.subplots()
 
         for i, lang in enumerate(self.langs_for_postprocess[self.city][:max_num_langs]):
@@ -622,13 +676,13 @@ class RandomWalkCityTweets:
             err_up = (plot_data['max_confint'] - plot_data['mean']).abs()
             err_down = (plot_data['min_confint'] - plot_data['mean']).abs()
             ax.bar(X + i * bar_width, data, yerr=[err_down, err_up], width=bar_width,
-                   align='center', edgecolor='black', label=lang, color=colors[i], alpha=0.8,
+                   align='center', edgecolor='black', label=lang, color=colors[i], alpha=0.7,
                    capsize=3)
         ax.set_xticks(X + bar_width / 2)
         ax.set_xticklabels(plot_data.index, rotation=45, fontsize=8)
-        ax.set_ylabel('percentage', family='serif', fontsize=10)
+        ax.set_ylabel('percentage', fontsize=8)
         ax.legend(fontsize=10, loc='best')
-        ax.set_title('Twitter lang settings of account followers from ' + self.city,
+        ax.set_title('Twitter language settings of root-account followers from ' + self.city,
                      family='serif', fontsize=10)
         ax.grid(linestyle='--', alpha=0.4)
         plt.tight_layout()
@@ -641,32 +695,33 @@ class RandomWalkCityTweets:
         """ TODO : description needed !!! """
         if not isinstance(self.stats_per_root_acc, pd.DataFrame):
             self.get_stats_per_root_acc()
-        # get relevant root accounts sorted by mean value
+        # get stats from relevant root accounts sorted by mean value
         self.stats_per_root_acc = self.stats_per_root_acc.sort_values(
             by=(self.langs_for_postprocess[self.city][0], 'mean'))
 
+        mpl.style.use('seaborn')
         fig, ax = plt.subplots()
         #
         bar_width = 0.4
         colors = ['green', 'blue', 'red']
-        X = np.arange(0, 2* self.stats_per_root_acc.shape[0], 2)
+        X = np.arange(0, 2 * self.stats_per_root_acc.shape[0], 2)
         for i, lang in enumerate(self.langs_for_postprocess[self.city]):
             plot_data = self.stats_per_root_acc[lang]
             data = plot_data['mean']
             err_up = plot_data.max_confint - plot_data['mean']
             err_down = (plot_data.min_confint - plot_data['mean']).abs()
             ax.bar(X + i * bar_width, data, yerr=[err_down, err_up], width=bar_width,
-                   align='center', edgecolor='black', label=lang, color=colors[i], alpha=0.8,
+                   align='center', edgecolor='black', label=lang, color=colors[i], alpha=0.7,
                    capsize=2)
         ax.set_xticks(X + bar_width / 2)
         ax.set_xticklabels(plot_data.index, rotation=45, fontsize=8)
-        ax.set_ylabel('proportion of tweets', family='serif', fontsize=8)
+        ax.set_ylabel('proportion of tweets', fontsize=8)
         ax.legend(fontsize=10, loc='best')
         ax.set_title('Language of (re)tweets by followers from ' + self.city + ' per account',
                      family='serif', fontsize=10)
         ax.grid(linestyle='--', alpha=0.4)
         plt.tight_layout()
-        plt.savefig('average_follower_per_account_in_' + self.city)
+        plt.savefig('percentage_of_each_lang_per_account_in_' + self.city)
         plt.show()
 
     def plot_lang_distribs_per_acc(self):
@@ -693,22 +748,24 @@ class RandomWalkCityTweets:
             plt.setp(bp['caps'], color=color)
             #plt.setp(bp['medians'], color=color)
 
+        mpl.style.use('seaborn')
         plt.figure()
         data_a = data[self.langs_for_postprocess[self.city][0]]
         data_b = data[self.langs_for_postprocess[self.city][1]]
 
         bar_width = 0.5
         tick_dist = 4
-        colors = ['#D7191C', '#2C7BB6']
+        #colors = ['#D7191C', '#2C7BB6']
+        colors = ['green', 'blue']
         bpl = plt.boxplot(data_a, positions=np.array(range(len(data_a))) * tick_dist - bar_width,
                           sym='', widths=bar_width, showmeans=True, patch_artist=True,
                           whiskerprops=dict(linestyle='--', linewidth=0.5, alpha=0.5),
-                          medianprops=dict(linewidth=2, color='white'),
+                          medianprops=dict(linewidth=2, color='black'),
                           meanprops=dict(marker="o", markeredgecolor ='black', markerfacecolor="None"))
         bpr = plt.boxplot(data_b, positions=np.array(range(len(data_b))) * tick_dist + bar_width,
                           sym='', widths=bar_width, showmeans=True, patch_artist=True,
                           whiskerprops=dict(linestyle='--', linewidth=0.5, alpha=0.5),
-                          medianprops=dict(linewidth=2, color='white'),
+                          medianprops=dict(linewidth=2, color='black'),
                           meanprops=dict(marker="o", markeredgecolor ='black', markerfacecolor="None"))
         set_box_color(bpl, colors[0])
         set_box_color(bpr, colors[1])
@@ -718,12 +775,14 @@ class RandomWalkCityTweets:
         plt.plot([], c=colors[1], label=self.langs_for_postprocess[self.city][1])
         plt.legend(loc='best')
 
+        plt.grid(linestyle='--', alpha=0.4)
+
         X = np.arange(0, len(ticks) * tick_dist, tick_dist)
         plt.xticks(X, ticks, rotation=45, fontsize=8)
         plt.xlim(-tick_dist, len(ticks) * tick_dist)
 
-        plt.ylabel('fraction of tweets in given lang', fontsize=8, family='serif')
-        plt.title('Distributions of language choice from root-accounts followers in ' + self.city,
+        plt.ylabel('fraction of tweets in given lang', fontsize=8)
+        plt.title('Language choice distributions from followers of root-accounts in ' + self.city,
                   family='serif', fontsize=10)
 
         plt.tight_layout()
@@ -734,31 +793,15 @@ class RandomWalkCityTweets:
         pass
 
 
-class StreamTweetData:
-    pass
-
-
-class PostProcessTweetData:
-    def __init__(self, data_file_name, city):
-        pass
-
-
-    def get_num_relevant_flws_per_acc(self):
-        self.relevant_flws_per_acc = dict()
-        for acc in self.av_nodes:
-            self.relevant_flws_per_acc[acc] = self.data_stats[self.data_stats[acc]].shape[0]
-
-
 class PlotTweetData(RandomWalkCityTweets):
 
-    def __init__(self):
+    def __init__(self, data_file_name, city):
         super().__init__()
-
 
     def plot_stats(self, lang):
         if not isinstance(self.stats_per_root_acc, pd.DataFrame):
             try:
-                self.stats_per_root_acc = pd.read_json(self.city + 'stats_per_root_acc.json')
+                self.stats_per_root_acc = pd.read_json(self.city + '_stats_per_root_acc.json')
             except ValueError:
                 self.get_stats_per_root_acc()
         if not isinstance(self.lang_settings_per_root_acc, pd.DataFrame ):
@@ -788,8 +831,8 @@ class PlotTweetData(RandomWalkCityTweets):
     def plot_comparison_stats(self, lang1, lang2):
         if not isinstance(self.stats_per_root_acc, pd.DataFrame):
             try:
-                self.stats_per_root_acc = pd.read_json(self.city + 'stats_per_root_acc.json')
-            except:
+                self.stats_per_root_acc = pd.read_json(self.city + '_stats_per_root_acc.json')
+            except ValueError:
                 self.get_stats_per_root_acc()
         cols_1 = [lang1 + stat for stat in ['_SE', '_mean', '_median']]
         cols_2 = [lang2 + stat for stat in ['_SE', '_mean', '_median']]
@@ -817,6 +860,15 @@ class PlotTweetData(RandomWalkCityTweets):
 
     def plot_comparison_boxplot(self):
         pass
+
+class StreamTweetData:
+    pass
+
+class ProcessTweetData:
+    pass
+
+class PlotTweetData:
+    pass
 
 
 

@@ -1,0 +1,7 @@
+tweepy
+langdetect
+statsmodels
+numpy
+pandas
+matplotlib
+pyprind
