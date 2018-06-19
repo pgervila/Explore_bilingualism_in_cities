@@ -581,8 +581,8 @@ class RandomWalkCityTweets:
         """ Find distribution of lang settings for each root account
             and , if requested, for users residents in the city only
             Args:
-                * city_only: boolean. True if settings have to be retrieved only for users from class instance city
-                    Default True
+                * city_only: boolean. True if settings have to be retrieved only for users
+                    from class instance city. Default True
             Output:
                 * sets value to instance attribute 'lang_settings_per_root_acc'
         """
@@ -616,7 +616,7 @@ class RandomWalkCityTweets:
 
     def get_sample_size_per_root_acc(self, print_sizes=False):
         """ Method to read number of relevant followers per account
-            for statistic analysis
+            for statistic analysis of (re)tweets languages
             Args:
                 * print_sizes: boolean. False if no printing of results is required
         """
@@ -645,84 +645,157 @@ class RandomWalkCityTweets:
         s_int = s_ref.intersection(s2)
         return len(s_int) / len(s_ref)
 
-    def plot_lang_settings_comparison(self, min_num_accs=200, max_num_langs=3, single_account=False):
+    def plot_lang_settings_per_acc(self, city_only=True, max_num_langs=3,
+                                   single_account=False, min_num_accs=200):
         """
             Method to visualize statistics on language settings in accounts from followers of root accounts
             Args:
+                * city_only: boolean. True if only followers whose location explicitly mentions
+                    the city are to be taken into account. False if followers are country-wide,
+                    not explicitly from city.  Default True
                 * min_num_accs: integer. Minimum number of available followers per root account
                     to consider statistics for it as relevant
                 * max_num_langs: integer > 0. Maximum number of languages considered for each root account
                 * single_account: boolean. If True, plot will be for a single root account only
         """
 
-        self.get_lang_settings_stats_per_root_acc()
-
-        self.lang_settings_per_root_acc = self.lang_settings_per_root_acc.sort_values(
-            by=(self.langs_for_postprocess[self.city][0], 'mean'))
-
-        bar_width = 0.4
-        colors = ['green', 'blue', 'red', 'yellow', 'orange']
-
+        self.get_lang_settings_stats_per_root_acc(city_only=city_only)
+        # set plot style
         mpl.style.use('seaborn')
 
-        fig, ax = plt.subplots()
+        if single_account:
+            sorted_lang_settings = self.lang_settings_per_root_acc.T.iloc[:, 0][:, 'mean'].sort_values(ascending=False)
+            sorted_langs = sorted_lang_settings.index
+            fig, ax = plt.subplots()
+            for i, lang in enumerate(sorted_langs[:max_num_langs]):
+                plot_data = self.lang_settings_per_root_acc[lang]
+                data = plot_data['mean']
+                err_up = (plot_data['max_confint'] - plot_data['mean']).abs()
+                err_down = (plot_data['min_confint'] - plot_data['mean']).abs()
+                ax.bar(i, data, yerr=[err_down, err_up],
+                       align='center', edgecolor='black', color='blue', alpha=0.7,
+                       capsize=3)
+            labels_font_size = 10
+            ax.set_xticks(np.arange(max_num_langs))
+            ax.set_xticklabels(sorted_langs[:max_num_langs], fontsize=labels_font_size)
+            ax.set_xlabel('Language', fontsize=labels_font_size)
+            ax.set_ylabel('Percentage of followers, %', fontsize=labels_font_size)
+            ax.tick_params(axis='both', which='major', labelsize=labels_font_size)
+            ax.grid(linestyle='--', alpha=0.8)
+            title = 'Twitter language settings of @{} followers'.format(self.lang_settings_per_root_acc.index[0])
+            if city_only:
+                title = title + ' from {}.'.format(self.city)
+            sample_size = int(self.lang_settings_per_root_acc.iloc[0][lang, 'num_accs'])
+            ax.set_title(title + ' (Sample size: {})'.format(sample_size),
+                         family='serif', fontsize=10)
+            plt.tight_layout()
+            if city_only:
+                plt.savefig('lang_settings_for_@{}_followers_in_{}'.format(self.lang_settings_per_root_acc.index[0],
+                                                                           self.city))
+            else:
+                plt.savefig('lang_settings_for_@{}_followers'.format(self.lang_settings_per_root_acc.index[0]))
+        else:
+            # sort data for better visualization
+            self.lang_settings_per_root_acc = self.lang_settings_per_root_acc.sort_values(
+                by=(self.langs_for_postprocess[self.city][0], 'mean'))
 
-        for i, lang in enumerate(self.langs_for_postprocess[self.city][:max_num_langs]):
+            bar_width = 0.4
+            colors = ['green', 'blue', 'red', 'yellow', 'orange']
 
-            plot_data = self.lang_settings_per_root_acc[lang][self.lang_settings_per_root_acc[lang].num_accs >=
-                                                              min_num_accs]
-            X = np.arange(0, 2 * plot_data.index.shape[0], 2)
-            data = plot_data['mean']
-            err_up = (plot_data['max_confint'] - plot_data['mean']).abs()
-            err_down = (plot_data['min_confint'] - plot_data['mean']).abs()
-            ax.bar(X + i * bar_width, data, yerr=[err_down, err_up], width=bar_width,
-                   align='center', edgecolor='black', label=lang, color=colors[i], alpha=0.7,
-                   capsize=3)
-        ax.set_xticks(X + bar_width / 2)
-        ax.set_xticklabels(plot_data.index, rotation=45, fontsize=8)
-        ax.set_ylabel('percentage', fontsize=8)
-        ax.legend(fontsize=10, loc='best')
-        ax.set_title('Twitter language settings of root-account followers from ' + self.city,
-                     family='serif', fontsize=10)
-        ax.grid(linestyle='--', alpha=0.4)
-        plt.tight_layout()
-        plt.savefig('lang_settings_in_' + self.city)
-        plt.show()
+            fig, ax = plt.subplots()
 
-        # self.get_lang_settings_stats_per_root_acc(city_only=False)
+            for i, lang in enumerate(self.langs_for_postprocess[self.city][:max_num_langs]):
 
-    def plot_lang_props_per_acc(self):
-        """ TODO : description needed !!! """
+                plot_data = self.lang_settings_per_root_acc[lang][self.lang_settings_per_root_acc[lang].num_accs >=
+                                                                  min_num_accs]
+                X = np.arange(0, 2 * plot_data.index.shape[0], 2)
+                data = plot_data['mean']
+                err_up = (plot_data['max_confint'] - plot_data['mean']).abs()
+                err_down = (plot_data['min_confint'] - plot_data['mean']).abs()
+                ax.bar(X + i * bar_width, data, yerr=[err_down, err_up], width=bar_width,
+                       align='center', edgecolor='black', label=lang, color=colors[i], alpha=0.7,
+                       capsize=3)
+            labels_font_size = 8
+            ax.set_xticks(X + bar_width / 2)
+            ax.set_xticklabels(plot_data.index, rotation=45, fontsize=labels_font_size)
+            ax.set_ylabel('percentage', fontsize=labels_font_size)
+            ax.tick_params(axis='both', which='major', labelsize=labels_font_size)
+            ax.legend(fontsize=10, loc='best')
+            ax.set_title('Twitter language settings of root-account followers in ' + self.city,
+                         family='serif', fontsize=10)
+            ax.grid(linestyle='--', alpha=0.6)
+            plt.tight_layout()
+            plt.savefig('lang_settings_in_' + self.city)
+            plt.show()
+
+            # self.get_lang_settings_stats_per_root_acc(city_only=False)
+
+    def plot_lang_props_per_acc(self, single_account=False, max_num_langs=3):
+        """
+            Method to visualize percentages of the three main languages of (re)tweets by followers of root accounts
+                * single_account: boolean. True if data is for a single account only. Default False.
+        """
         if not isinstance(self.stats_per_root_acc, pd.DataFrame):
             self.get_stats_per_root_acc()
-        # get stats from relevant root accounts sorted by mean value
-        self.stats_per_root_acc = self.stats_per_root_acc.sort_values(
-            by=(self.langs_for_postprocess[self.city][0], 'mean'))
 
-        mpl.style.use('seaborn')
-        fig, ax = plt.subplots()
-        #
-        bar_width = 0.4
-        colors = ['green', 'blue', 'red']
-        X = np.arange(0, 2 * self.stats_per_root_acc.shape[0], 2)
-        for i, lang in enumerate(self.langs_for_postprocess[self.city]):
-            plot_data = self.stats_per_root_acc[lang]
-            data = plot_data['mean']
-            err_up = plot_data.max_confint - plot_data['mean']
-            err_down = (plot_data.min_confint - plot_data['mean']).abs()
-            ax.bar(X + i * bar_width, data, yerr=[err_down, err_up], width=bar_width,
-                   align='center', edgecolor='black', label=lang, color=colors[i], alpha=0.7,
-                   capsize=2)
-        ax.set_xticks(X + bar_width / 2)
-        ax.set_xticklabels(plot_data.index, rotation=45, fontsize=8)
-        ax.set_ylabel('proportion of tweets', fontsize=8)
-        ax.legend(fontsize=10, loc='best')
-        ax.set_title('Language of (re)tweets by followers from ' + self.city + ' per account',
-                     family='serif', fontsize=10)
-        ax.grid(linestyle='--', alpha=0.4)
-        plt.tight_layout()
-        plt.savefig('percentage_of_each_lang_per_account_in_' + self.city)
-        plt.show()
+        if single_account:
+            sorted_lang_props = self.stats_per_root_acc.T.iloc[:, 0][:, 'mean'].sort_values(ascending=False)
+            sorted_langs = sorted_lang_props.index
+            fig, ax = plt.subplots()
+
+            for i, lang in enumerate(sorted_langs[:max_num_langs]):
+                plot_data = self.stats_per_root_acc[lang]
+                data = 100 * plot_data['mean']
+                err_up = 100 * (plot_data['max_confint'] - plot_data['mean']).abs()
+                err_down = 100 * (plot_data['min_confint'] - plot_data['mean']).abs()
+                ax.bar(i, data, yerr=[err_down, err_up],
+                       align='center', edgecolor='black', color='blue', alpha=0.7,
+                       capsize=3)
+            labels_font_size = 10
+            ax.set_xticks(np.arange(max_num_langs))
+            ax.set_xticklabels(sorted_langs[:max_num_langs], fontsize=labels_font_size)
+            ax.set_xlabel('Language', fontsize=labels_font_size, fontweight='bold')
+            ax.set_ylabel('Percentage of tweets, %', fontsize=labels_font_size, fontweight='bold')
+            ax.tick_params(axis='both', which='major', labelsize=labels_font_size)
+            ax.grid(linestyle='--', alpha=0.8)
+            ax.set_title('Language percentages of (re)tweets by @{} '
+                         'followers in {}'.format(self.stats_per_root_acc.index[0], self.city),
+                         family='serif', fontsize=10)
+            plt.tight_layout()
+            plt.savefig('lang_ptcs_tweets_by_@{}_'
+                        'followers_in_{}'.format(self.stats_per_root_acc.index[0], self.city))
+
+        else:
+            # get stats from relevant root accounts sorted by mean value
+            self.stats_per_root_acc = self.stats_per_root_acc.sort_values(
+                by=(self.langs_for_postprocess[self.city][0], 'mean'))
+
+            mpl.style.use('seaborn')
+            fig, ax = plt.subplots()
+            #
+            bar_width = 0.4
+            colors = ['green', 'blue', 'red']
+            X = np.arange(0, 2 * self.stats_per_root_acc.shape[0], 2)
+            for i, lang in enumerate(self.langs_for_postprocess[self.city]):
+                plot_data = self.stats_per_root_acc[lang]
+                data = plot_data['mean']
+                err_up = plot_data.max_confint - plot_data['mean']
+                err_down = (plot_data.min_confint - plot_data['mean']).abs()
+                ax.bar(X + i * bar_width, data, yerr=[err_down, err_up], width=bar_width,
+                       align='center', edgecolor='black', label=lang, color=colors[i], alpha=0.7,
+                       capsize=2)
+            labels_font_size = 8
+            ax.set_xticks(X + bar_width / 2)
+            ax.set_xticklabels(plot_data.index, rotation=45, fontsize=labels_font_size)
+            ax.set_ylabel('proportion of tweets', fontsize=labels_font_size)
+            ax.tick_params(axis='both', which='major', labelsize=labels_font_size)
+            ax.legend(fontsize=10, loc='best')
+            ax.set_title('Language of (re)tweets by followers from ' + self.city + ' per account',
+                         family='serif', fontsize=10)
+            ax.grid(linestyle='--', alpha=0.6)
+            plt.tight_layout()
+            plt.savefig('percentage_of_each_lang_per_account_in_' + self.city)
+            plt.show()
 
     def plot_lang_distribs_per_acc(self):
         """
@@ -775,13 +848,15 @@ class RandomWalkCityTweets:
         plt.plot([], c=colors[1], label=self.langs_for_postprocess[self.city][1])
         plt.legend(loc='best')
 
-        plt.grid(linestyle='--', alpha=0.4)
+        plt.grid(linestyle='--', alpha=0.5)
 
         X = np.arange(0, len(ticks) * tick_dist, tick_dist)
-        plt.xticks(X, ticks, rotation=45, fontsize=8)
-        plt.xlim(-tick_dist, len(ticks) * tick_dist)
 
-        plt.ylabel('fraction of tweets in given lang', fontsize=8)
+        labels_font_size = 8
+        plt.xticks(X, ticks, rotation=45, fontsize=labels_font_size)
+        plt.xlim(-tick_dist, len(ticks) * tick_dist)
+        plt.ylabel('fraction of tweets in given lang', fontsize=labels_font_size)
+        plt.tick_params(axis='both', which='major', labelsize=labels_font_size)
         plt.title('Language choice distributions from followers of root-accounts in ' + self.city,
                   family='serif', fontsize=10)
 

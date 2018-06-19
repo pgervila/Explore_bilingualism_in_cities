@@ -4,7 +4,7 @@ The project aims to quantify language choice in bilingual environments through e
 gathered from Twitter users
 
 It contains:
-  - A Python class that access Twitter API to stream and store tweets 
+  - A Python class with methods that access the Twitter API to stream and store tweets 
   from a number of followers of specified accounts
   - Methods to post-process tweets by language and do statistical analysis of the data. 
   - Plotting methods to visualize conclusions
@@ -12,15 +12,15 @@ It contains:
     by jumping between the networks of random residents in a given country or city
  
 
-#### Steps to get started:
+### Steps to get started:
 
  In order to use the code, users will need to create a Twitter account and provide OAuth settings and 
 an access token: __consumer_key, consumer_secret,
 access_token, access_token_secret__ in order to have access to Twitter API. These are automatically
 generated once [registration](https://dev.twitter.com/apps) on Twitter API is completed. 
 
-Keys and tokens must be stored in a `.py` file called `twitter_pwd.py` and
-keys and tokens saved as variables. A dummy file with fake keys and tokens is provided.
+Keys and tokens must be stored as python variables in a file called `twitter_pwd.py` . 
+A dummy file with fake keys and tokens is provided.
 
 A number of relevant accounts for a number of cities are provided as class attributes 
 of the main class. These cities are : __Barcelona, Brussels, Kiev and Riga__
