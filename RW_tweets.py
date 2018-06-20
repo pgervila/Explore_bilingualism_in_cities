@@ -718,7 +718,7 @@ class RandomWalkCityTweets:
             labels_font_size = 8
             ax.set_xticks(X + bar_width / 2)
             ax.set_xticklabels(plot_data.index, rotation=45, fontsize=labels_font_size)
-            ax.set_ylabel('percentage', fontsize=labels_font_size)
+            ax.set_ylabel('percentage, %', fontsize=labels_font_size)
             ax.tick_params(axis='both', which='major', labelsize=labels_font_size)
             ax.legend(fontsize=10, loc='best')
             ax.set_title('Twitter language settings of root-account followers in ' + self.city,
@@ -864,8 +864,29 @@ class RandomWalkCityTweets:
         plt.savefig('lang_distribs_per_acc_in_' + self.city)
         plt.show()
 
-    def plot_hist_per_root_acc(self):
-        pass
+    def plot_hist_comparison(self, account, num_bins=20, alpha=0.5):
+        """
+            Method to compare language choice distribution for a given account
+            in the form of a histogram
+        """
+        mpl.style.use('seaborn')
+        data = self.data_stats[self.data_stats[account]]
+        langs = self.langs_for_postprocess[self.city][:2]
+        colors = ['green', 'blue']
+        for lang, color in zip(langs, colors):
+            key = '{}_mean'.format(lang)
+            plot_data = 100 * data[key]
+            plt.hist(plot_data, bins=num_bins, normed=True, alpha=alpha,
+                     color=color, edgecolor='black', label=lang)
+        plt.legend()
+        plt.grid(linestyle='--', alpha=0.6)
+        plt.xlabel('percentage of tweets in language, %', fontsize=10, fontweight='bold')
+        plt.ylabel('frequency', fontsize=10, fontweight='bold')
+        plt.tick_params(axis='both', which='major', labelsize=8)
+        plt.title('Normalized histograms of linguistic choice of @{} followers in {}'.format(account, self.city),
+                  family='serif', fontsize=10)
+        plt.tight_layout()
+        plt.savefig('hist_lang_choice_@{}_followers'.format(account))
 
 
 class PlotTweetData(RandomWalkCityTweets):
