@@ -2,8 +2,9 @@ import os
 import time
 import re
 from collections import defaultdict
-import matplotlib as mpl
+import matplotlib
 import matplotlib.pyplot as plt
+matplotlib.rcParams['figure.figsize'] = (15, 10)
 import pandas as pd
 import numpy as np
 
@@ -32,10 +33,8 @@ class RandomWalkCityTweets:
     city_root_accounts = dict()
 
     city_root_accounts['Kiev'] = {'KyivOperativ', 'kyivmetroalerts', 'auto_kiev',
-                                 'ukrpravda_news', 'HromadskeUA','lb_ua', 'Korrespondent',
-                                 'LIGAnet', 'radiosvoboda', '5channel', 'tsnua', 'VWK668',
-                                 'Gordonuacom', 'zn_ua', 'patrolpoliceua', 'ServiceSsu',
-                                 'MVS_UA', 'segodnya_life', 'kp_ukraine', 'vesti'}
+                                 'ukrpravda_news', 'Korrespondent',
+                                 '5channel', 'VWK668', 'patrolpoliceua', 'ServiceSsu', 'segodnya_life'}
 
     city_root_accounts['Barcelona'] = {'TMB_Barcelona':'CAT', 'bcn_ajuntament':'CAT',
                                        'LaVanguardia':'SPA', 'hola':'SPA', 'diariARA':'CAT', 'elperiodico':'SPA',
@@ -64,7 +63,7 @@ class RandomWalkCityTweets:
                     the same specified name
                 * city: string. Name of city where bilingualism is to be analyzed
                 * city_accounts: set of strings. Strings are Twitter accounts related to city
-                * city_key_words: list of strings. Strings are expresisons
+                * city_key_words: list of strings. Strings are expressions
                     to recognize the city in different languages or spellings
                 * city_langs: list of strings. Strings must be valid identifiers of languages.
                     Use reference https://en.wikipedia.org/wiki/List_of_ISO_639-2_codes
@@ -475,22 +474,28 @@ class RandomWalkCityTweets:
         else:
             return 'Undefined'
 
-    def get_num_flws_per_city_acc(self):
+    def get_num_flws_per_acc(self, force_update=False):
         """
             Get number of followers per each account of a given city
             Args:
-                * city : string. Name of the city
+                * force_update: boolean. True if number of followers has to be updated and stored
             Output:
-                * pandas series saved in data file
+                * pandas series ( recomputed series saved to database if force_update is True)
         """
-        num_flws_per_acc = {}
-        for acc in self.city_root_accounts[self.city]:
-            acc_info = self.api.get_user(acc)
-            num_flws_per_acc[acc] = acc_info.followers_count
-        # make pandas series and save to hdf
-        num_flws_per_acc = pd.Series(num_flws_per_acc)
+        # define database node name to store num_flws_per_acc
         node = "/".join(['', self.city, 'num_flws_main_accs'])
-        num_flws_per_acc.to_hdf(self.data_file_name, node)
+
+        if force_update:
+            num_flws_per_acc = {}
+            for acc in self.city_root_accounts[self.city]:
+                acc_info = self.api.get_user(acc)
+                num_flws_per_acc[acc] = acc_info.followers_count
+            # make pandas series and save to hdf
+            num_flws_per_acc = pd.Series(num_flws_per_acc)
+
+            num_flws_per_acc.to_hdf(self.data_file_name, node)
+        else:
+            return pd.read_hdf(self.data_file_name, node)
 
     def get_num_resids_per_acc(self):
         node1 = "/".join(['', self.city, 'pct_resid_root_accs'])
@@ -652,6 +657,124 @@ class RandomWalkCityTweets:
         s_int = s_ref.intersection(s2)
         return len(s_int) / len(s_ref)
 
+    def get_weighted_sample(self):
+        """ Get a random weighted sample of followers from all accounts.
+            Each account will contribute with a sample fo followers.
+            A minimum of 100 followers is considered for the least popular account.
+            Rest of accounts sample sizes are computed multiplying the minimum size
+            by a factor that is the ratio of resident follwoers with respect to the least
+            popular account in the city
+        """
+
+        num_res_per_acc = self.get_num_resids_per_acc()
+        sample_size_per_acc = (100 * num_res_per_acc / num_res_per_acc[num_res_per_acc.argmin()]).astype(int)
+
+        # construct global weighted sample of users ids
+        ids_weighted_sample = []
+        for (acc, sample_size) in sample_size_per_acc.iteritems():
+            acc_sample = self.data_stats[self.data_stats[acc]].sample(sample_size).id_str
+            ids_weighted_sample.extend(acc_sample)
+        ids_weighted_sample = np.unique(ids_weighted_sample)
+
+        return ids_weighted_sample
+
+    def get_weighted_distribution(self, lang):
+        """
+            Method to obtain distribution of weighted users for a given lang
+            Args:
+                lang: string. Use same code as in rest of module
+        """
+
+        # get random weighted sample
+        weighted_sample = self.get_weighted_sample()
+        # get mean column for specified language
+        df_column = '{}_mean'.format(lang)
+        return self.data_stats.loc[self.data_stats.id_str.isin(weighted_sample)][df_column]
+
+    def plot_flws_resids_per_acc(self):
+        """
+            Method to plot number of total followers and of city-resident followers per account
+        """
+        # define plot style
+        mpl.style.use('seaborn')
+        import matplotlib.ticker as mpltick
+
+        # define plot data
+        # get idxs to sort accs by num residents
+        arg_sorted = self.get_num_resids_per_acc().argsort()
+        # sort data
+        num_flws_per_acc = self.get_num_flws_per_acc().iloc[arg_sorted]
+        num_resids_per_acc = self.get_num_resids_per_acc().iloc[arg_sorted]
+        data = [num_flws_per_acc, num_resids_per_acc]
+
+        # define plot
+        fig, ax = plt.subplots()
+        ax2 = ax.twinx()
+        frames = [ax, ax2]
+        bar_width = 0.6
+        colors = ['black', 'orange']
+        X = np.arange(0, 2 * num_flws_per_acc.size, 2)
+        labels = ['num_flws', 'num_resid_flws']
+        errors_flag = [False, True]
+        
+        # define errors for resident estimates
+        node1 = "/".join(['', self.city, 'pct_resid_root_accs'])
+        pct_resids_per_acc = pd.read_hdf(self.data_file_name, node1).sort_index()
+        df_errors = pd.DataFrame({key: proportion.proportion_confint(val * 6000, 6000)
+                                  for key, val in pct_resids_per_acc.iteritems()}).T
+        df_errors.columns = ['min_confint', 'max_confint']
+        df_errors = df_errors.iloc[arg_sorted].mul(self.get_num_flws_per_acc().iloc[arg_sorted], axis=0)
+        errors = df_errors['max_confint'].subtract(self.get_num_resids_per_acc(), axis=0).iloc[arg_sorted]
+        
+        for i, (data, frame, color, label, plot_error) in enumerate(zip(data, frames, colors, labels, errors_flag)):
+            if plot_error:
+                error = errors.values
+                errs = [error, error]
+                frame.bar(X + i * bar_width, data, yerr=errs, align='center', edgecolor='black', color=color,
+                          width=bar_width, label=label)
+            else:
+                frame.bar(X + i * bar_width, data, align='center', edgecolor='black', color=color,
+                          width=bar_width, label=label)
+
+
+        # set up axis1
+        labels_font_size = 8
+        ax.set_xticks(X + bar_width / 2)
+        ax.set_xticklabels(num_flws_per_acc.index, rotation=45, fontsize=labels_font_size)
+        ax.set_ylabel('Total_followers', color=colors[0])
+        ax.yaxis.set_major_locator(plt.MaxNLocator(5))
+        ax.yaxis.set_major_formatter(mpltick.EngFormatter(unit='', places=None))
+        ax.tick_params(axis='y', labelsize=8)
+        for t in ax.get_yticklabels():
+            t.set_color(colors[0])
+        ax.xaxis.grid(False)
+        ax.yaxis.grid(linestyle='--', alpha=0.6)
+
+        # set up axis2
+        ax2.set_ylabel('Resident_followers', color=colors[1])
+        ax2.yaxis.set_major_locator(plt.MaxNLocator(5))
+        ax2.yaxis.set_major_formatter(mpltick.EngFormatter(unit='', places=None))
+        ax2.tick_params(axis='y', labelsize=8)
+        for t in ax2.get_yticklabels():
+            t.set_color(colors[1])
+        ax2.grid(False)
+
+        # set legend
+        lines, labels = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax2.legend(lines + lines2, labels + labels2, loc=9)
+
+        # title
+        plt.title('Number of followers and number of residents per account in {}'.format(self.city),
+                  family='serif', fontsize=10)
+
+        # save figure
+        plt.tight_layout()
+        fig_name = 'num_flws_resids_per_acc_in_{}'.format(self.city)
+        plt.savefig(os.path.join(self.city, 'figures', fig_name))
+
+        plt.show()
+
     def plot_lang_settings_per_acc(self, city_only=True, max_num_langs=3,
                                    single_account=False, min_num_accs=200):
         """
@@ -683,7 +806,7 @@ class RandomWalkCityTweets:
                 ax.bar(i, data, yerr=[err_down, err_up],
                        align='center', edgecolor='black', color='blue', alpha=0.7,
                        width=bar_width, capsize=3)
-            labels_font_size = 10
+            labels_font_size = 8
             ax.set_xticks(np.arange(max_num_langs))
             ax.set_xticklabels(sorted_langs[:max_num_langs], fontsize=labels_font_size)
             ax.set_xlabel('Language', fontsize=labels_font_size, fontweight='bold')
@@ -698,11 +821,13 @@ class RandomWalkCityTweets:
             ax.set_title(title + ' (Sample size: {})'.format(sample_size),
                          family='serif', fontsize=10)
             plt.tight_layout()
+
             if city_only:
-                plt.savefig('lang_settings_for_@{}_followers_in_{}'.format(self.lang_settings_per_root_acc.index[0],
-                                                                           self.city))
+                fig_name = 'lang_settings_for_@{}_followers_in_{}'.format(self.lang_settings_per_root_acc.index[0],
+                                                                          self.city)
             else:
-                plt.savefig('lang_settings_for_@{}_followers'.format(self.lang_settings_per_root_acc.index[0]))
+                fig_name = 'lang_settings_for_@{}_followers'.format(self.lang_settings_per_root_acc.index[0])
+            plt.savefig(os.path.join(self.city, 'figures', fig_name))
         else:
             # sort data for better visualization
             self.lang_settings_per_root_acc = self.lang_settings_per_root_acc.sort_values(
@@ -724,7 +849,7 @@ class RandomWalkCityTweets:
                 ax.bar(X + i * bar_width, data, yerr=[err_down, err_up], width=bar_width,
                        align='center', edgecolor='black', label=lang, color=colors[i], alpha=0.7,
                        capsize=3)
-            labels_font_size = 10
+            labels_font_size = 8
             ax.set_xticks(X + bar_width / 2)
             ax.set_xticklabels(plot_data.index, rotation=45, fontsize=labels_font_size)
             ax.set_ylabel('percentage, %', fontsize=labels_font_size)
@@ -735,7 +860,10 @@ class RandomWalkCityTweets:
             ax.xaxis.grid(False)
             ax.yaxis.grid(linestyle='--', alpha=0.6)
             plt.tight_layout()
-            plt.savefig('lang_settings_in_' + self.city)
+            # save figure
+            fig_name = 'lang_settings_in_{}'.format(self.city)
+            plt.savefig(os.path.join(self.city, 'figures', fig_name))
+
             plt.show()
 
             # self.get_lang_settings_stats_per_root_acc(city_only=False)
@@ -762,7 +890,7 @@ class RandomWalkCityTweets:
                 ax.bar(i, data, yerr=[err_down, err_up],
                        align='center', edgecolor='black', color='blue', alpha=0.7,
                        width=bar_width, capsize=3)
-            labels_font_size = 10
+            labels_font_size = 8
             ax.set_xticks(np.arange(max_num_langs))
             ax.set_xticklabels(sorted_langs[:max_num_langs], fontsize=labels_font_size)
             ax.set_xlabel('Language', fontsize=labels_font_size, fontweight='bold')
@@ -779,8 +907,9 @@ class RandomWalkCityTweets:
                          'followers from {}'.format(self.stats_per_root_acc.index[0], self.city),
                          family='serif', fontsize=10)
             plt.tight_layout()
-            plt.savefig('lang_ptcs_tweets_by_@{}_'
-                        'followers_in_{}'.format(self.stats_per_root_acc.index[0], self.city))
+            # save figure
+            fig_name = 'lang_ptcs_tweets_by_@{}_followers_in_{}'.format(self.stats_per_root_acc.index[0], self.city)
+            plt.savefig(os.path.join(self.city, 'figures', fig_name))
 
         else:
             # get stats from relevant root accounts sorted by mean value
@@ -807,12 +936,14 @@ class RandomWalkCityTweets:
             ax.set_ylabel('Percentage of tweets, %', fontsize=labels_font_size)
             ax.tick_params(axis='both', which='major', labelsize=labels_font_size)
             ax.legend(fontsize=10, loc='best')
-            ax.set_title('Language of (re)tweets by followers from ' + self.city + ' per account',
+            ax.set_title('Language of (re)tweets by account followers from ' + self.city,
                          family='serif', fontsize=10)
             ax.xaxis.grid(False)
             ax.yaxis.grid(linestyle='--', alpha=0.6)
             plt.tight_layout()
-            plt.savefig('percentage_of_each_lang_per_account_in_' + self.city)
+            # save figure
+            fig_name = 'percentage_of_each_lang_per_account_in_{}'.format(self.city)
+            plt.savefig(os.path.join(self.city, 'figures', fig_name))
             plt.show()
 
     def plot_lang_distribs_per_acc(self):
@@ -876,7 +1007,7 @@ class RandomWalkCityTweets:
 
         X = np.arange(0, len(ticks_labels) * tick_dist, tick_dist)
 
-        labels_font_size = 10
+        labels_font_size = 8
         ax.set_xticks(X)
         ax.set_xticklabels(ticks_labels, rotation=45, fontsize=labels_font_size)
         ax.set_xlim(-tick_dist, len(ticks_labels) * tick_dist)
@@ -886,7 +1017,10 @@ class RandomWalkCityTweets:
                      family='serif', fontsize=10)
 
         fig.tight_layout()
-        fig.savefig('lang_distribs_per_acc_in_{}'.format(self.city))
+        # save figure
+        fig_name = 'lang_distribs_per_acc_in_{}'.format(self.city)
+        plt.savefig(os.path.join(self.city, 'figures', fig_name))
+
         plt.show()
 
     def plot_hist_comparison(self, account, num_bins=20, alpha=0.5, max_num_langs=2):
@@ -929,7 +1063,10 @@ class RandomWalkCityTweets:
         ax2.grid(linestyle='--', alpha=0.6)
         ax2.legend(loc='upper left')
         fig.tight_layout()
-        fig.savefig('hist_lang_choice_@{}_followers'.format(account))
+        # save figure
+        fig_name = 'hist_lang_choice_@{}_followers'.format(account)
+        plt.savefig(os.path.join(self.city, 'figures', fig_name))
+
         plt.show()
 
     def optimize_saving_space(self):
@@ -943,6 +1080,11 @@ class RandomWalkCityTweets:
                 data.to_hdf('new_city_random_walks.h5', n)
         os.remove(self.data_file_name)
         os.rename('new_city_random_walks.h5', self.data_file_name)
+
+    def weighted_avg_lang_preference(self):
+        """ Find pct of followers that prefer a given language per account and
+            compute weighted average of those percentages to have an etimate of the entire population
+        """
 
 
 class PlotTweetData(RandomWalkCityTweets):
