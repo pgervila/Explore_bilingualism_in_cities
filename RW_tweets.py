@@ -2,9 +2,9 @@ import os
 import time
 import re
 from collections import defaultdict
-import matplotlib
+import matplotlib as mpl
 import matplotlib.pyplot as plt
-matplotlib.rcParams['figure.figsize'] = (15, 10)
+mpl.rcParams['figure.figsize'] = (15, 10)
 import pandas as pd
 import numpy as np
 
@@ -33,8 +33,8 @@ class RandomWalkCityTweets:
     city_root_accounts = dict()
 
     city_root_accounts['Kiev'] = {'KyivOperativ', 'kyivmetroalerts', 'auto_kiev',
-                                 'ukrpravda_news', 'Korrespondent',
-                                 '5channel', 'VWK668', 'patrolpoliceua', 'ServiceSsu', 'segodnya_life'}
+                                  'ukrpravda_news', 'Korrespondent',
+                                  '5channel', 'VWK668', 'patrolpoliceua', 'ServiceSsu', 'segodnya_life'}
 
     city_root_accounts['Barcelona'] = {'TMB_Barcelona':'CAT', 'bcn_ajuntament':'CAT',
                                        'LaVanguardia':'SPA', 'hola':'SPA', 'diariARA':'CAT', 'elperiodico':'SPA',
@@ -46,10 +46,10 @@ class RandomWalkCityTweets:
 
     key_words = {'Barcelona': {'country': ['Catalu'], 'city': ['Barcel']},
                  'Kiev': {'country': ['Україна', 'Ukraine', 'Украина'],
-                           'city': ['Kiev', 'Kyiv', 'Київ', 'Киев']},
+                          'city': ['Kiev', 'Kyiv', 'Київ', 'Киев']},
                  'Brussels': {'country': ['Belg'], 'city': ['Bruxel', 'Brussel']},
                  'Riga': {'country': ['Latvija', 'Латвия', 'Latvia'],
-                           'city': ['Rīg', 'Rig', 'Рига']}
+                          'city': ['Rīg', 'Rig', 'Рига']}
                 }
 
     langs_for_postprocess = {'Kiev': ['uk', 'ru', 'en'], 'Barcelona': ['ca', 'es', 'en'],
@@ -106,9 +106,10 @@ class RandomWalkCityTweets:
         self.api = tweepy.API(auth, wait_on_rate_limit=True, wait_on_rate_limit_notify=True)
 
         if update:
-            self.process_data()
+            self.process_data(max_num_langs=3)
         else:
-            self.data_stats = pd.read_json(self.city + '_data_stats.json')
+            data_file_path = os.path.join(self.city, self.city + '_data_stats.json')
+            self.data_stats = pd.read_json(data_file_path)
             self.get_available_nodes()
 
     def get_account_network(self, root_account_name, rel_type='followers', max_num=100,
@@ -504,7 +505,7 @@ class RandomWalkCityTweets:
         num_flws_per_acc = pd.read_hdf(self.data_file_name, node2).sort_index()
         return pct_resids_per_acc * num_flws_per_acc
 
-    def process_data(self, num_tweets_for_stats=40, save=True):
+    def process_data(self, num_tweets_for_stats=40, save=True, max_num_langs=2):
         """
             Method to post-process tweet data and create a pandas DataFrame
             that summarizes all information
@@ -513,9 +514,10 @@ class RandomWalkCityTweets:
                 * num_tweets_for_stats: integer >= 40 and <= 60. Number of tweets that will be taken into
                     account for each follower.
                 * save: boolean. Specifies whether to save the processed data or not. Defaults to True.
+                * max_num_langs: integer. Maximum number of languages to be processed. Default 2
 
             Output:
-            * It sets value for self.data_stats
+                * Method sets value for self.data_stats and saves file to specified directory
 
         """
         langs_selected = self.langs_for_postprocess[self.city]
@@ -542,7 +544,7 @@ class RandomWalkCityTweets:
                                        '/'.join(['', self.city, root_acc, 'followers'])).id_str
             self.data_stats[root_acc] = self.data_stats.id_str.isin(root_acc_ids)
 
-        for lang in self.langs_for_postprocess[self.city][:2]:
+        for lang in self.langs_for_postprocess[self.city][:max_num_langs]:
             # Replace with confint
             mean = lang + '_mean'
             max_cint = lang + '_max_cint'
@@ -559,7 +561,8 @@ class RandomWalkCityTweets:
             self.data_stats[min_cint], self.data_stats[max_cint] = intervs[0], intervs[1]
 
         if save:
-            self.data_stats.to_json(self.city + '_data_stats.json')
+            data_file = os.path.join(self.city, self.city + '_data_stats.json')
+            self.data_stats.to_json(data_file)
 
     def get_stats_per_root_acc(self, save=True, load_data=False):
         """
@@ -568,7 +571,8 @@ class RandomWalkCityTweets:
         """
         if load_data:
             try:
-                self.stats_per_root_acc = pd.read_json(self.city + '_stats_per_root_acc.json')
+                data_file = os.path.join(self.city, self.city + '_stats_per_root_acc.json')
+                self.stats_per_root_acc = pd.read_json(data_file)
             except ValueError:
                 print('data file is not available in current directory')
         else:
@@ -587,7 +591,8 @@ class RandomWalkCityTweets:
             self.stats_per_root_acc = pd.concat(data_frames_per_lang, axis=1)
 
             if save:
-                self.stats_per_root_acc.reset_index().to_json(self.city + '_stats_per_root_acc.json')
+                data_file_path = os.path.join(self.city, self.city + '_stats_per_root_acc.json')
+                self.stats_per_root_acc.reset_index().to_json(data_file_path)
 
     def get_lang_settings_stats_per_root_acc(self, city_only=True):
         """ Find distribution of lang settings for each root account
@@ -657,17 +662,21 @@ class RandomWalkCityTweets:
         s_int = s_ref.intersection(s2)
         return len(s_int) / len(s_ref)
 
-    def get_weighted_sample(self):
-        """ Get a random weighted sample of followers from all accounts.
-            Each account will contribute with a sample fo followers.
+    def get_weighted_sample(self, rand_seed=42, min_size=100):
+        """
+            Get a random weighted sample of followers from all accounts.
+            Each account will contribute with a sample of followers.
             A minimum of 100 followers is considered for the least popular account.
             Rest of accounts sample sizes are computed multiplying the minimum size
-            by a factor that is the ratio of resident follwoers with respect to the least
+            by a factor that is the ratio of resident followers with respect to the least
             popular account in the city
+            Args:
+                * rand_seed: integer. Seed to reproduce random sampling
+                * min_size: minimum sample size from the account with least residents
         """
-
+        np.random.seed(rand_seed)
         num_res_per_acc = self.get_num_resids_per_acc()
-        sample_size_per_acc = (100 * num_res_per_acc / num_res_per_acc[num_res_per_acc.argmin()]).astype(int)
+        sample_size_per_acc = (min_size * num_res_per_acc / num_res_per_acc[num_res_per_acc.argmin()]).astype(int)
 
         # construct global weighted sample of users ids
         ids_weighted_sample = []
@@ -678,15 +687,17 @@ class RandomWalkCityTweets:
 
         return ids_weighted_sample
 
-    def get_weighted_distribution(self, lang):
+    def get_weighted_distribution(self, lang, rand_seed=42, min_size=100):
         """
             Method to obtain distribution of weighted users for a given lang
             Args:
                 lang: string. Use same code as in rest of module
+                rand_seed: positive integer. Seed to reproduce random sample
+                min_size: positive integer. Minimum sample size from the account with least residents
         """
 
         # get random weighted sample
-        weighted_sample = self.get_weighted_sample()
+        weighted_sample = self.get_weighted_sample(rand_seed=rand_seed, min_size=min_size)
         # get mean column for specified language
         df_column = '{}_mean'.format(lang)
         return self.data_stats.loc[self.data_stats.id_str.isin(weighted_sample)][df_column]
@@ -1023,20 +1034,27 @@ class RandomWalkCityTweets:
 
         plt.show()
 
-    def plot_hist_comparison(self, account, num_bins=20, alpha=0.5, max_num_langs=2):
+    def plot_hist_comparison(self, account=None, num_bins=20, alpha=0.5, max_num_langs=2, min_size=100):
         """
             Method to compare language choice distribution for a given account
-            in the form of histograms and their cumulative frequency
+            in the form of histograms and their cumulative frequency. If no account is provided,
+            method will automatically compute a weighted average of all model accounts and plot comparison
+            for chosen languages
             Args:
-                * account: string. Account name
+                * account: string. Account name. If None, the weighted sample of all accounts is considered
                 * num_bins: integer. Number of bins of the histograms. Default 20
                 * alpha: 0 < float < 1. Matplotlib transparency parameter
                 * max_num_langs: integer <= 3. Number of languages under consideration. Default 2
         """
         mpl.style.use('seaborn')
-        data = self.data_stats[self.data_stats[account]]
         langs = self.langs_for_postprocess[self.city][:max_num_langs]
         colors = ['green', 'blue', 'red']
+        if account:
+            data = self.data_stats[self.data_stats[account]]
+        else:
+            data = pd.DataFrame({'{}_mean'.format(langs[0]): self.get_weighted_distribution(langs[0], min_size=min_size).values,
+                                 '{}_mean'.format(langs[1]): self.get_weighted_distribution(langs[1], min_size=min_size).values,
+                                 '{}_mean'.format(langs[2]): self.get_weighted_distribution(langs[2], min_size=min_size).values})
 
         fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
         for lang, color in zip(langs, colors):
@@ -1048,8 +1066,15 @@ class RandomWalkCityTweets:
         ax1.xaxis.grid(linestyle='--', alpha=0.6)
         ax1.set_ylabel('normed frequency\n(histogram)', fontsize=10, fontweight='bold')
         ax1.tick_params(axis='both', which='major', labelsize=8)
-        ax1.set_title('Distribution of linguistic choice of @{} followers from {}'.format(account, self.city),
-                      family='serif', fontsize=10)
+        if account:
+            ax1.set_title('Distribution of linguistic choice of @{} followers from {}'.format(account, self.city),
+                          family='serif', fontsize=10)
+        else:
+            # get sample size
+            samp_size = data.shape[0]
+            ax1.set_title('Distribution of linguistic choice of weighted sample '
+                          'of followers in {} (sample size: {})'.format(self.city, samp_size),
+                          family='serif', fontsize=10)
         ax1.legend(loc='best')
 
         for lang, color in zip(langs, colors):
@@ -1064,7 +1089,10 @@ class RandomWalkCityTweets:
         ax2.legend(loc='upper left')
         fig.tight_layout()
         # save figure
-        fig_name = 'hist_lang_choice_@{}_followers'.format(account)
+        if account:
+            fig_name = 'hist_lang_choice_@{}_followers'.format(account)
+        else:
+            fig_name = 'hist_lang_choice_weighted_sample_followers'.format(account)
         plt.savefig(os.path.join(self.city, 'figures', fig_name))
 
         plt.show()
@@ -1090,7 +1118,7 @@ class RandomWalkCityTweets:
 class PlotTweetData(RandomWalkCityTweets):
 
     def __init__(self, data_file_name, city):
-        super().__init__()
+        super().__init__(data_file_name, city)
 
 
 class StreamTweetData:
