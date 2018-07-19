@@ -1879,6 +1879,9 @@ class ProcessTweetData(StreamTweetData):
         std_medians = np.std(generated_medians)
         return mean_medians - 1.96 * std_medians, mean_medians + 1.96 * std_medians
 
+    def resample_distribs(self):
+        pass
+
 
 class PlotTweetData(ProcessTweetData):
 
@@ -2158,11 +2161,7 @@ class PlotTweetData(ProcessTweetData):
                 acc_data = (acc_data[lang] / acc_data.tot_lang_counts).values
                 data[lang].append(acc_data)
 
-        def set_box_color(bp, color):
-            plt.setp(bp['boxes'], color=color)
-            # plt.setp(bp['whiskers'], color=color)
-            plt.setp(bp['caps'], color=color)
-            # plt.setp(bp['medians'], color=color)
+
 
         mpl.style.use('seaborn')
         # plt.figure()
@@ -2186,6 +2185,12 @@ class PlotTweetData(ProcessTweetData):
                          whiskerprops=dict(linestyle='--', linewidth=0.5, alpha=0.5),
                          medianprops=dict(linewidth=2, color='black'),
                          meanprops=dict(marker="o", markeredgecolor='black', markerfacecolor="None"))
+
+        def set_box_color(bp, color):
+            plt.setp(bp['boxes'], color=color)
+            # plt.setp(bp['whiskers'], color=color)
+            plt.setp(bp['caps'], color=color)
+            # plt.setp(bp['medians'], color=color)
         set_box_color(bpl, colors[0])
         set_box_color(bpr, colors[1])
 
@@ -2281,20 +2286,108 @@ class PlotTweetData(ProcessTweetData):
 
         plt.show()
 
+    def __repr__(self):
+        return "_".join([type(self).__name__, self.city])
 
-class DataComparison(PlotTweetData):
 
-    def compare_accs_distrib(self, accs_dict):
 
+class InterCityComparison:
+
+    def __init__(self, cities, filename='city_random_walks.h5'):
         """
             Method to compare data from accounts of different cities
             Args:
-                * accs_dict: dictionary. Keys are strings of account names, values are cities accounts are linked to
+                * cities: tuple or list of strings. Strings are city names
         """
-        cities = set(accs_dict.values())
+        self.city_objects = {}
         for city in cities:
-            RandomWalkCityTweets('city_random_walks.h5', city)
+            self.city_objects[city] = PlotTweetData(filename, city)
 
-            # data = self.data_stats[self.data_stats[account]]
+        mpl.rcParams['figure.figsize'] = (15, 10)
+
+    def compare_plot_boxes(self, root_accs, lang_ix=0):
+        """
+            Compare distributions for a given language of followers of accounts from different cities
+            Args:
+                * root_accs: tuple or list of strings. Strings are root account names
+        """
+
+        self.data_accs = {}
+        self.langs = {}
+
+        data_to_plot = []
+        for acc in root_accs:
+
+            # find city account belongs to
+            for city in self.city_objects:
+                if acc in self.city_objects[city].av_nodes:
+                    acc_city = city
+                    break
+
+            self.langs[acc_city] = self.city_objects[acc_city].langs_for_postprocess[acc_city][lang_ix]
+
+            key = self.langs[acc_city] + '_mean'
+
+            bool_idx = self.city_objects[acc_city].data_stats[acc]
+            self.data_accs[acc] = self.city_objects[acc_city].data_stats[bool_idx][key].values
+
+            data_to_plot.append(self.data_accs[acc])
+
+        # plot data
+        mpl.style.use('seaborn')
+        fig, (ax, ax2) = plt.subplots(2, 1)
+        colors = ['green', 'blue']
+        box_pos = np.arange(len(root_accs))
+
+        bplot = ax.boxplot(data_to_plot, positions=box_pos, widths=(0.4, 0.4),
+                           boxprops=dict(linewidth=2, color='black'), vert=False,
+                           showmeans=True, medianprops=dict(linewidth=2, color='black'),
+                           meanprops=dict(marker="^", markerfacecolor="red", markersize=8),
+                           patch_artist=True)
+
+        for patch, color in zip(bplot['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+
+
+        ax.xaxis.grid(True, linestyle='--', alpha=0.7)
+        ax.yaxis.grid(False)
+
+        labels_font_size = 10
+        ax.set_yticks(box_pos)
+        # box labels
+        tlabs = [acc + '\n ({})'.format(lang[1]) for acc, lang in zip(root_accs, self.langs.items())]
+        ax.set_yticklabels(tlabs, rotation=45, fontsize=labels_font_size)
+        ax.tick_params(axis='both', which='major', labelsize=labels_font_size)
+        ax.plot(0.9, 1.4, "^", markersize=8, color='red')
+        ax.text(0.92, 1.38, "mean")
+        accs = ['@{}'.format(acc) for acc in root_accs]
+
+        ax.set_title('Language choice distributions from followers of {} accounts'.format(', '.join(accs)),
+                      family='serif', fontsize=10)
+
+        # plot CDFs
+        num_bins=20
+        for data, color, acc, (city, lang) in zip(data_to_plot, colors, root_accs, self.langs.items()):
+            # key = '{}_mean'.format(lang)
+            # plot_data = 100 * data[key]
+            ax2.hist(data, bins=num_bins, normed=True, histtype='step',
+                     color=color, cumulative=1, alpha=1, label='@{}({})'.format(acc, lang))
+        ax2.set_xlabel('fraction of tweets in lang', fontsize=labels_font_size)
+        ax2.set_ylabel('cumulative fraction of followers')
+        ax2.grid(True, alpha=0.7)
+        ax2.legend(loc='lower right')
+
+        fig.tight_layout()
+        # save figure
+        fig_name = 'Language choice distributions from followers of {} accounts'.format(', '.join(accs))
+        plt.savefig(os.path.join(acc_city, 'figures', fig_name))
+
+
+
+
+
+
+
 
 
