@@ -42,12 +42,10 @@ Specify if followers must be city or country-wide residents. repeat for all desi
 
 
 
-
-
-
    
-### Where users can get help with your project
+### Where users can get help with this project
 
-Contact me on pgervila@gmail.com for any question or doubt concerning this repo
+Contact me on pgervila@gmail.com for any question or doubt concerning this repo. Check 
+also my [blog](https://pgervila.github.io/) for more detailed descriptions
    
 

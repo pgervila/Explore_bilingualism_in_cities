@@ -502,6 +502,7 @@ class ProcessTweetData(StreamTweetData):
         self.data_stats = pd.DataFrame()
         self.lang_settings_per_root_acc = defaultdict(dict)
         self.stats_per_root_acc = dict()
+        self.weighted_samples_distribs = dict()
 
         if update:
             self.process_data(max_num_langs=3)
@@ -725,12 +726,12 @@ class ProcessTweetData(StreamTweetData):
 
     def compute_weighted_sample_users(self, rand_seed=42, min_size=100, use_avg_resids=False):
         """
-            Get a random weighted sample of followers from all accounts.
+            Method to obtain a weighted sample of followers from all accounts.
             Each account will contribute with a sample of followers.
             A minimum of 'min_size' followers is considered for the least popular account.
             Rest of accounts sample sizes are computed multiplying the minimum size
-            by a factor that is the ratio of resident followers with respect to the least
-            popular account in the city
+            by a factor that is the ratio of resident followers of each root account to that of the least
+            popular root account in the city
             Args:
                 * rand_seed: integer. Seed to reproduce random sampling
                 * min_size: minimum sample size from the account with least residents
@@ -738,14 +739,14 @@ class ProcessTweetData(StreamTweetData):
                     false if residents per account are to be considered a random variable that has to be sampled
                     every time the function is called
             Output:
-                * numpy array of ids of weighted sample
+                * numpy array of unique ids of weighted sample
         """
         # TODO : add new column with weighted sample to data_stats dataframe ???
 
         # set random seed
         np.random.seed(rand_seed)
         # Scale num residents of each account relative to account with the least residents ( divide by num residents
-        # of the account with the least residents)
+        # of the account with the least residents )
         if use_avg_resids:
             resids_per_acc = self.num_resids_per_acc['avg_resids']
         else:
@@ -769,12 +770,15 @@ class ProcessTweetData(StreamTweetData):
                 * lang: string. Use same code as in rest of module
                 * rand_seed: positive integer. Seed to reproduce random sample
                 * min_size: positive integer. Minimum sample size from the account with least residents
+                * use_avg_resids: boolean. True if weights are to be computed based on average residents per account,
+                    false if residents per account are to be considered a random variable that has to be sampled
+                    every time the function is called
             Output:
                 * pandas Series with percentage values of language use for selected followers
         """
         # get random weighted sample
-        users = self.compute_weighted_sample_users(rand_seed=rand_seed,
-                                                             min_size=min_size, use_avg_resids=use_avg_resids)
+        users = self.compute_weighted_sample_users(rand_seed=rand_seed, min_size=min_size,
+                                                   use_avg_resids=use_avg_resids)
         # get mean column for specified language
         df_column = '{}_mean'.format(lang)
         return self.data_stats.loc[self.data_stats.id_str.isin(users)][df_column]
@@ -841,48 +845,46 @@ class ProcessTweetData(StreamTweetData):
         std_medians = np.std(generated_medians)
         return mean_medians - 1.96 * std_medians, mean_medians + 1.96 * std_medians
 
-    def resample_weighted_sample(self, lang, num_w_samps=100, num_props_samps=100, min_size=100):
+    def resample_weighted_sample(self, num_w_samps=100, num_props_samps=100, min_size=100):
         """
-            Method to generate random samples of the weighted average of accounts. Both users and its lang proportions
-            are repeatedly sampled. Observed lang proportions and its standard deviations are used
-            to generate a normal distributions for each proportion
+            Method to simulate random samples of the weighted average of accounts.
+            Both weights and users' lang proportions are repeatedly sampled.
+            Observed lang proportions and its standard deviations are used
+            to generate a normal distributions for each proportion and for each relevant lang
             Args:
-                * lang: string. Language
-                * num_w_samps: integer.
-                * num_props_samps: integer.
-                * min_size: integer.
-
+                * num_w_samps: integer. Requested number of resamples of accounts' weights
+                * num_props_samps: integer. Requested number of resamples for each follower language proportion
+                * min_size: integer. Minimum size of the smallest sample (because of limited number of
+                    available followers per root account, resample weights need to scale and fit with respect
+                    to changing relative sizes. If the requested size of the least important account at each
+                    resample is too high, there might not be sufficient available followers for the most relevant
+                    account, i.e those with higher weights )
             Output:
-                *
+                * assigns result of num_w_samps * num_props_samps experiments to a pandas DataFrame
+                 with 4 columns : median, mean, pct_more_in_lang, pct_as_much_in_lang. The 'weighted_samples_distribs'
+                 instance attribute is set to the DataFrame value, with a different key for each language
         """
-        list_w_samps = []
 
-        for seed in np.random.randint(10000, size=num_w_samps):
-            # get lang ratios for a given seed
-            props = self.compute_weighted_sample_props(lang, rand_seed=seed,
-                                                       min_size=min_size).values
-            stds = proportion.std_prop(props, 40)
-            generated_props = np.random.normal(props, stds, size=(num_props_samps, props.size))
+        for lang in self.langs_for_postprocess[self.city][:3]:
+            list_w_samps = []
+            for seed in np.random.randint(10000, size=num_w_samps):
+                # get lang ratios for a given seed
+                props = self.compute_weighted_sample_props(lang, rand_seed=seed,
+                                                           min_size=min_size).values
+                # compute standard deviation for each proportion from sample ratio and number of samples (40)
+                stds = proportion.std_prop(props, 40)
+                # simulate new probabilistic proportions
+                generated_props = np.random.normal(props, stds, size=(num_props_samps, props.size))
 
-            stats = self.compute_stats_props_distrib(lang, distrib=generated_props)
+                stats = self.compute_stats_props_distrib(lang, distrib=generated_props)
 
-            list_w_samps.append(stats)
+                list_w_samps.append(stats)
 
-        distribs = np.concatenate(list_w_samps)
-
-        # Alternatives
-        # num_w_samps = 3
-        # num_props_samps = 5
-        # w_samp_size = 2
-        # zz = np.zeros((num_w_samps * num_props_samps, w_samp_size))
-        # for i in np.arange(num_w_samps):
-        #     zz[i * num_props_samps:i * num_props_samps + num_props_samps, :] = np.random.randint(1, 10,
-        #                                                                                          size=(num_props_samps, w_samp_size))
-        # how to get percentiles ( 5% confidence interval )
-
-
-        #np.percentile(distribs.mean(axis=1), q=[2.5, 97.5])
-        return distribs
+            distribs = np.concatenate(list_w_samps)
+            self.weighted_samples_distribs[lang] = pd.DataFrame(distribs,
+                                                                columns=['medians', 'means',
+                                                                         'pct_more_in_lang', 'pct_as_much_in_lang'])
+        self.weighted_samples_distribs = pd.concat(self.weighted_samples_distribs, axis=1)
 
     def random_walk(self):
         """
@@ -1318,6 +1320,56 @@ class PlotTweetData(ProcessTweetData):
             fig_name = 'hist_lang_choice_weighted_sample_followers'.format(account)
         plt.savefig(os.path.join(self.city, 'figures', fig_name))
 
+        plt.show()
+
+    def plot_weighted_sample_stats(self, min_size=25):
+
+        if not isinstance(self.weighted_samples_distribs, pd.DataFrame):
+            self.resample_weighted_sample(min_size=min_size)
+
+        mpl.style.use('seaborn')
+
+        bar_width = 0.1
+        colors = ['green', 'blue']
+
+        fig, ax = plt.subplots(2, 1)
+
+        for i, xlabels, ylabel in zip(range(2),
+                                      [['median_follower', 'mean_follower'],
+                                       ['pct_more_in_lang', 'pct_as_much_in_lang']],
+                                      ['fraction of tweets', 'percentage of users']):
+
+            data = self.weighted_samples_distribs['ca']
+            data = data.values[:, :2] if not i else data.values[:, 2:]
+            plot_data = ax[i].boxplot(data, positions=np.arange(2) - 0.1, widths=bar_width,
+                                      patch_artist=True, medianprops=dict(linewidth=2, color='black'),
+                                      labels=xlabels, whis=[1, 99])
+            plt.setp(plot_data['boxes'][0], color=colors[0])
+            plt.setp(plot_data['boxes'][1], color=colors[0])
+
+            data = self.weighted_samples_distribs['es']
+            data = data.values[:, :2] if not i else data.values[:, 2:]
+            plot_data = ax[i].boxplot(data, positions=np.arange(2) + 0.1, widths=bar_width,
+                                      patch_artist=True, labels=xlabels,
+                                      medianprops=dict(linewidth=2, color='black'), whis=[1, 99])
+            plt.setp(plot_data['boxes'][0], color=colors[1])
+            plt.setp(plot_data['boxes'][1], color=colors[1])
+
+            ax[i].set_ylabel(ylabel)
+            ax[i].xaxis.grid(False)
+            ax[i].yaxis.grid(linestyle='--', alpha=0.5)
+
+        # draw temporary red and blue lines and use them to create a legend
+        for i in range(2):
+            ax[i].plot([], c=colors[0], label=self.langs_for_postprocess[self.city][0])
+            ax[i].plot([], c=colors[1], label=self.langs_for_postprocess[self.city][1])
+            ax[i].legend(loc='best')
+
+        fig.suptitle("Probabilistic distributions of weighted average account",
+                     fontsize=12, family='serif')
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        fig_name = 'weighted_sample_indicators_distribs_in_{}'.format(self.city)
+        plt.savefig(os.path.join(self.city, 'figures', fig_name))
         plt.show()
 
     def __repr__(self):
