@@ -624,7 +624,9 @@ class ProcessTweetData(StreamTweetData):
                 data_file = os.path.join(self.city, self.city + '_stats_per_root_acc.pickle')
                 self.stats_per_root_acc = pd.read_pickle(data_file)
             except FileNotFoundError:
-                print('data file is not available in specified directory')
+                print('stats_per_root_acc pickled data file is not available in specified directory')
+                # call method and force stats computation
+                self.compute_stats_per_root_acc(load_data=False)
         else:
             data_frames_per_lang = dict()
             for lang in self.langs_for_postprocess[self.city]:
@@ -671,7 +673,7 @@ class ProcessTweetData(StreamTweetData):
     def compute_rand_num_resids_per_acc(self):
         """
             Method to compute a random sample of the number of city residents
-            per account using mean value and its standard deviation
+            per account using mean value and its standard error
             Output:
                 * pandas Series with random number of residents per account
         """
@@ -713,21 +715,29 @@ class ProcessTweetData(StreamTweetData):
 
         self.lang_settings_per_root_acc = pd.concat(stats_per_lang, axis=1)
 
-    def quantify_accs_similarity(self, ref_key, other_key):
+    def quantify_accs_similarity(self, ref_key, other_key, min_size=50):
         """
             Method to compute the degree of similarity between followers of ref_key account
             as compared to those of another account specified in 'other_key'. It computes the
             percentage of common followers relative to reference account
         """
-        s_ref = set(self.data_stats[self.data_stats[ref_key]].id_str)
-        s2 = set(self.data_stats[self.data_stats[other_key]].id_str)
-        s_int = s_ref.intersection(s2)
-        return len(s_int) / len(s_ref)
 
-    def compute_weighted_sample_users(self, rand_seed=42, min_size=100, use_avg_resids=False):
+        resids_per_acc = self.num_resids_per_acc['avg_resids']
+        relat_sizes = resids_per_acc / resids_per_acc[resids_per_acc.argmin()]
+
+        s_ref = set(np.random.choice(self.data_stats[self.data_stats[ref_key]].id_str,
+                                     size=int(min_size*relat_sizes[ref_key]), replace=False))
+        s_other = set(np.random.choice(self.data_stats[self.data_stats[other_key]].id_str,
+                                       size=int(min_size*relat_sizes[other_key]), replace=False))
+        s_int = s_ref.intersection(s_other)
+        return len(s_int) / min_size
+
+    def compute_weighted_sample_users(self, rand_seed=42, min_size=100, use_obs_weight=False):
         """
-            Method to obtain a weighted sample of followers from all accounts.
-            Each account will contribute with a sample of followers.
+            Method to obtain a weighted sample of followers from all accounts, where the weight
+            is determined by the relative proportion of city residents of each account.
+            Each account contributes with a sample of followers and the size of each subsample is
+            determined by the relative weight of the account.
             A minimum of 'min_size' followers is considered for the least popular account.
             Rest of accounts sample sizes are computed multiplying the minimum size
             by a factor that is the ratio of resident followers of each root account to that of the least
@@ -735,7 +745,7 @@ class ProcessTweetData(StreamTweetData):
             Args:
                 * rand_seed: integer. Seed to reproduce random sampling
                 * min_size: minimum sample size from the account with least residents
-                * use_avg_resids: boolean. True if weights are to be computed based on average residents per account,
+                * use_obs_weight: boolean. True if weights are to be computed based on average residents per account,
                     false if residents per account are to be considered a random variable that has to be sampled
                     every time the function is called
             Output:
@@ -747,7 +757,7 @@ class ProcessTweetData(StreamTweetData):
         np.random.seed(rand_seed)
         # Scale num residents of each account relative to account with the least residents ( divide by num residents
         # of the account with the least residents )
-        if use_avg_resids:
+        if use_obs_weight:
             resids_per_acc = self.num_resids_per_acc['avg_resids']
         else:
             resids_per_acc = self.compute_rand_num_resids_per_acc()
@@ -763,22 +773,22 @@ class ProcessTweetData(StreamTweetData):
 
         return ids_weighted_sample
 
-    def compute_weighted_sample_props(self, lang, rand_seed=42, min_size=100, use_avg_resids=False):
+    def compute_weighted_sample_props(self, lang, rand_seed=42, min_size=100, use_obs_weight=False):
         """
             Method to obtain, for a given lang, the weighted distribution of users' lang proportions
             Args:
                 * lang: string. Use same code as in rest of module
                 * rand_seed: positive integer. Seed to reproduce random sample
                 * min_size: positive integer. Minimum sample size from the account with least residents
-                * use_avg_resids: boolean. True if weights are to be computed based on average residents per account,
-                    false if residents per account are to be considered a random variable that has to be sampled
+                * use_obs_weight: boolean. True if weights are to be computed based on average residents per account,
+                    False if residents per account are to be considered a random variable that has to be sampled
                     every time the function is called
             Output:
                 * pandas Series with percentage values of language use for selected followers
         """
         # get random weighted sample
         users = self.compute_weighted_sample_users(rand_seed=rand_seed, min_size=min_size,
-                                                   use_avg_resids=use_avg_resids)
+                                                   use_obs_weight=use_obs_weight)
         # get mean column for specified language
         df_column = '{}_mean'.format(lang)
         return self.data_stats.loc[self.data_stats.id_str.isin(users)][df_column]
@@ -801,7 +811,7 @@ class ProcessTweetData(StreamTweetData):
                    - percentage of users that use the requested language as much as other languages
         """
         if distrib is None:
-            distrib = self.compute_weighted_sample_props(lang, use_avg_resids=True)
+            distrib = self.compute_weighted_sample_props(lang, use_obs_weight=True)
 
         if distrib.ndim == 2:
             median = np.median(distrib, axis=1)
@@ -818,7 +828,7 @@ class ProcessTweetData(StreamTweetData):
 
         return stats
 
-    def compute_median_conf_int(self, acc, lang, num_samples=1000):
+    def compute_median_conf_int(self, acc, lang, num_samples=1000, n=40):
 
         """
             Method to obtain, for a specified language and account, the distribution of the median
@@ -827,14 +837,15 @@ class ProcessTweetData(StreamTweetData):
                 * acc: string. Name of root account
                 * lang: string. Language for which the median is to be estimated
                 * num_samples: integer. Number of samples to be generated for each proportion value
+                * n: integer. Number of available tweets per user
 
         """
         # TODO: if no account specified, apply procedure to weighted sample ( get weighted sample)
 
         # get computed proportions from followers for given account
         props = self.data_stats[self.data_stats[acc]][lang + "_mean"].values
-        # knowing size is always 40, get standard deviation of the proportion for each account follower
-        stds = proportion.std_prop(props, 40)
+        # knowing size is always n = 40, get standard error of the proportion for each account follower
+        stds = proportion.std_prop(props, n)
         # generate new props using mean and std for each follower (assuming normal distrib)
         generated_props = np.random.normal(props, stds, size=(num_samples, props.size))
         # compute medians of each generated sample ( need to clip if generated values
@@ -845,12 +856,22 @@ class ProcessTweetData(StreamTweetData):
         std_medians = np.std(generated_medians)
         return mean_medians - 1.96 * std_medians, mean_medians + 1.96 * std_medians
 
-    def resample_weighted_sample(self, num_w_samps=100, num_props_samps=100, min_size=100):
+    def resample_weighted_sample(self, num_w_samps=100, num_props_samps=100, min_size=100, n=40):
         """
-            Method to simulate random samples of the weighted average of accounts.
-            Both weights and users' lang proportions are repeatedly sampled.
-            Observed lang proportions and its standard deviations are used
-            to generate a normal distributions for each proportion and for each relevant lang
+            Method to simulate (num_w_samps * num_props_samps) random samples
+            of the weighted distribution of language proportions.
+            For each user/followers and using the central limit theorem,
+            observed lang proportions and their corresponding standard errors are used
+            as the parameters of normal distributions that allow to generate samples
+            from normal distributions both for each proportion and for each relevant lang.
+
+            Account relative weights as well as language use proportions for each follower
+            are repeatedly sampled using normal approximation of sample mean
+
+            Observed lang proportions and their standard deviations are used
+            to generate a normal distribution for each proportion and for each relevant lang
+
+
             Args:
                 * num_w_samps: integer. Requested number of resamples of accounts' weights
                 * num_props_samps: integer. Requested number of resamples for each follower language proportion
@@ -859,23 +880,26 @@ class ProcessTweetData(StreamTweetData):
                     to changing relative sizes. If the requested size of the least important account at each
                     resample is too high, there might not be sufficient available followers for the most relevant
                     account, i.e those with higher weights )
+                * n: integer. Number of tweets available to estimate proportion of language use per user.
+                    Defaults to 40
             Output:
                 * assigns result of num_w_samps * num_props_samps experiments to a pandas DataFrame
-                 with 4 columns : median, mean, pct_more_in_lang, pct_as_much_in_lang. The 'weighted_samples_distribs'
-                 instance attribute is set to the DataFrame value, with a different key for each language
+                 with 4 columns : median, mean, pct_more_in_lang, pct_as_much_in_lang.
+                 The 'weighted_samples_distribs' instance attribute value is set to the DataFrame value,
+                 with a different key for each language
         """
 
         for lang in self.langs_for_postprocess[self.city][:3]:
             list_w_samps = []
             for seed in np.random.randint(10000, size=num_w_samps):
-                # get lang ratios for a given seed
+                # get sample of the weighted distribution of lang proportions for a given seed
                 props = self.compute_weighted_sample_props(lang, rand_seed=seed,
                                                            min_size=min_size).values
-                # compute standard deviation for each proportion from sample ratio and number of samples (40)
-                stds = proportion.std_prop(props, 40)
-                # simulate new probabilistic proportions
-                generated_props = np.random.normal(props, stds, size=(num_props_samps, props.size))
-
+                # compute standard error for each estimated proportion from sample ratio and sample size n
+                std_errs = proportion.std_prop(props, n)
+                # simulate new probabilistic proportions using central limit theorem
+                generated_props = np.random.normal(props, std_errs, size=(num_props_samps, props.size))
+                #
                 stats = self.compute_stats_props_distrib(lang, distrib=generated_props)
 
                 list_w_samps.append(stats)
@@ -1337,7 +1361,7 @@ class PlotTweetData(ProcessTweetData):
         for i, xlabels, ylabel in zip(range(2),
                                       [['median_follower', 'mean_follower'],
                                        ['pct_more_in_lang', 'pct_as_much_in_lang']],
-                                      ['fraction of tweets', 'percentage of users']):
+                                       ['fraction of tweets', 'percentage of users, %']):
 
             data = self.weighted_samples_distribs['ca']
             data = data.values[:, :2] if not i else data.values[:, 2:]
@@ -1365,7 +1389,7 @@ class PlotTweetData(ProcessTweetData):
             ax[i].plot([], c=colors[1], label=self.langs_for_postprocess[self.city][1])
             ax[i].legend(loc='best')
 
-        fig.suptitle("Probabilistic distributions of weighted average account",
+        fig.suptitle("Distributions of statistics of {} Twitter users".format(self.city),
                      fontsize=12, family='serif')
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         fig_name = 'weighted_sample_indicators_distribs_in_{}'.format(self.city)
