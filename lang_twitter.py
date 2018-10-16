@@ -2,7 +2,8 @@
 import os
 import time
 import re
-from collections import defaultdict
+import itertools
+from collections import defaultdict, OrderedDict
 
 # Scientific Python
 import pandas as pd
@@ -721,7 +722,7 @@ class ProcessTweetData(StreamTweetData):
             as compared to those of another account specified in 'other_key'. It computes the
             percentage of common followers relative to reference account
         """
-
+        # estimate accounts' relative sizes
         resids_per_acc = self.num_resids_per_acc['avg_resids']
         relat_sizes = resids_per_acc / resids_per_acc[resids_per_acc.argmin()]
 
@@ -732,27 +733,7 @@ class ProcessTweetData(StreamTweetData):
         s_int = s_ref.intersection(s_other)
         return len(s_int) / min_size
 
-    def compute_weighted_sample_users(self, rand_seed=42, min_size=100, use_obs_weight=False):
-        """
-            Method to obtain a weighted sample of followers from all accounts, where the weight
-            is determined by the relative proportion of city residents of each account.
-            Each account contributes with a sample of followers and the size of each subsample is
-            determined by the relative weight of the account.
-            A minimum of 'min_size' followers is considered for the least popular account.
-            Rest of accounts sample sizes are computed multiplying the minimum size
-            by a factor that is the ratio of resident followers of each root account to that of the least
-            popular root account in the city
-            Args:
-                * rand_seed: integer. Seed to reproduce random sampling
-                * min_size: minimum sample size from the account with least residents
-                * use_obs_weight: boolean. True if weights are to be computed based on average residents per account,
-                    false if residents per account are to be considered a random variable that has to be sampled
-                    every time the function is called
-            Output:
-                * numpy array of unique ids of weighted sample
-        """
-        # TODO : add new column with weighted sample to data_stats dataframe ???
-
+    def compute_sample_size_per_acc(self, min_size=100, use_obs_weight=True, rand_seed=42):
         # set random seed
         np.random.seed(rand_seed)
         # Scale num residents of each account relative to account with the least residents ( divide by num residents
@@ -763,14 +744,93 @@ class ProcessTweetData(StreamTweetData):
             resids_per_acc = self.compute_rand_num_resids_per_acc()
         sample_size_per_acc = (min_size * resids_per_acc /
                                resids_per_acc[resids_per_acc.argmin()]).astype(int)
+        return sample_size_per_acc.sort_values()
 
-        # construct global weighted sample of users ids
+    def compute_intersection_users(self, min_size=100, rand_seed=42):
+        """
+            Method to identify users that are followers of n different accounts,
+            where 2 <= n <= max_num_accounts
+        """
+        # get sorted sizes
+        sample_sizes = self.compute_sample_size_per_acc(min_size=min_size, rand_seed=rand_seed)
+        samples_dict = OrderedDict()
+        for acc, size in sample_sizes.iteritems():
+            sample = self.data_stats[self.data_stats[acc]].id_str.sample(size)
+            samples_dict[acc] = sample
+        # Initialize dict where keys are number of sets and values are sets of unique ids
+        # that define intersection of accs followers
+        intersec_users = dict()
+        num_accs = len(self.av_acc_nodes)
+        # iterate over all possible combination sizes
+        for comb_size in range(2, num_accs):
+            intersec_users[comb_size] = set()
+            # iterate over all possible combinations
+            for tup in itertools.combinations(samples_dict.values(), comb_size):
+                tup = [set(x) for x in tup]
+                intersec_users[comb_size].update(set.intersection(*tup))
+        return intersec_users
+
+    def compute_weighted_sample_users(self, rand_seed=42, min_size=100, use_obs_weight=False):
+        """
+            Method to obtain a weighted sample of followers from all accounts, where the weight
+            is determined by the relative proportion of city residents of each account.
+            Each account contributes with a sample of followers and the size of each subsample is
+            determined by the relative weight of the account.
+            A minimum of 'min_size' followers is considered for the least popular account.
+            Rest of accounts sample sizes are computed multiplying the minimum size
+            by a factor that is the ratio of the number of resident followers of each root account
+            to that of the least popular root account in the city.
+            Args:
+                * rand_seed: integer. Seed to reproduce random sampling
+                * min_size: minimum sample size from the account with least residents
+                * use_obs_weight: boolean. True if weights are to be computed based on average residents per account,
+                    false if residents per account are to be considered a random variable that has to be sampled
+                    every time the function is called
+            Output:
+                * numpy array of unique ids of weighted sample
+        """
+
+        # set random seed
+        np.random.seed(rand_seed)
+
+        # Scale num residents of each account relative to account with the least
+        # residents ( divide by num of residents of the account with the least residents)
+        sample_size_per_acc = self.compute_sample_size_per_acc(min_size=min_size,
+                                                               use_obs_weight=use_obs_weight)
+        av_sample_size_per_acc = pd.Series(self.sample_size_per_root_acc)
+        # define convenience dataframe for iteration purposes
+        df = pd.concat([sample_size_per_acc, av_sample_size_per_acc], axis=1)
+        df.columns = ['req_sample_size', 'av_sample_size']
+        # sort by size of available samples
+        df = df.sort_values('av_sample_size')
+
+        # construct stratified sample of users ids
+        # by iterating over increasingly larger available samples
+        # remove redundant ids in order to sample them only once
         ids_weighted_sample = []
-        for (acc, sample_size) in sample_size_per_acc.iteritems():
-            acc_sample = self.data_stats[self.data_stats[acc]].sample(sample_size).id_str
+        for ix, (acc, cols) in enumerate(df.iterrows()):
+            sample_size = cols['req_sample_size']
+            if not ix:
+                # first available sample from sorted iterator can be fully sampled
+                acc_sample = self.data_stats[self.data_stats[acc]].sample(sample_size).id_str
+            else:
+                # already sampled users must be removed from subsequent available samples
+                # get list of previous sets
+                list_previous_sets = [set(self.data_stats[self.data_stats[pr_acc]].id_str)
+                                      for pr_acc, _ in df.iloc[:ix].iterrows()]
+                # get union of previous sets
+                previous_sets = set().union(*list_previous_sets)
+                # get difference of current set with previous sets
+                curr_set = set(self.data_stats[self.data_stats[acc]].id_str)
+                rem_set = curr_set.difference(previous_sets)
+                # reduce sample size after removal of estimated intersection with previous sets
+                pct_intersec = 1 - len(rem_set) / len(curr_set)
+                sample_size = int(sample_size * (1 - pct_intersec))
+                mask = self.data_stats[acc] & self.data_stats.id_str.isin(rem_set)
+                acc_sample = self.data_stats[mask].sample(sample_size).id_str
             ids_weighted_sample.extend(acc_sample)
-        ids_weighted_sample = np.unique(ids_weighted_sample)
 
+        # ids_weighted_sample = np.unique(ids_weighted_sample)
         return ids_weighted_sample
 
     def compute_weighted_sample_props(self, lang, rand_seed=42, min_size=100, use_obs_weight=False):
@@ -1360,7 +1420,7 @@ class PlotTweetData(ProcessTweetData):
 
         for i, xlabels, ylabel in zip(range(2),
                                       [['median_follower', 'mean_follower'],
-                                       ['pct_more_in_lang', 'pct_as_much_in_lang']],
+                                       ['majority_of_tweets_in_lang', 'half_of_tweets_in_lang']],
                                        ['fraction of tweets', 'percentage of users, %']):
 
             data = self.weighted_samples_distribs['ca']
