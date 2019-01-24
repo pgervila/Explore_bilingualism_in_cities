@@ -1,18 +1,21 @@
+# Standard Lib
 import os
 import time
 import re
-from collections import defaultdict
-import matplotlib as mpl
-import matplotlib.pyplot as plt
-mpl.rcParams['figure.figsize'] = (15, 10)
+import itertools
+from collections import defaultdict, OrderedDict
+
+# Scientific Python
 import pandas as pd
 import numpy as np
+import matplotlib as mpl
+import matplotlib.pyplot as plt
 
 # Twitter API for python
 import tweepy
-from tweepy import Stream, OAuthHandler, StreamListener
+from tweepy import OAuthHandler
 # import secret codes to access Twitter API
-from twitter_pwd import access_token, access_token_secret, consumer_key, consumer_secret
+from .twitter_pwd import access_token, access_token_secret, consumer_key, consumer_secret
 
 # language detection
 from langdetect import detect
@@ -25,20 +28,21 @@ from statsmodels.stats import proportion
 import pyprind
 
 
-class RandomWalkCityTweets:
-    
-    """ Get tweets from random relevant followers that live in a given city
-        and return data on language use """
+class StreamTweetData:
+    """ 
+        Class to download tweets from random relevant followers that live in a given city
+        and return data on language use 
+    """
 
     city_root_accounts = dict()
 
     city_root_accounts['Kiev'] = {'KyivOperativ', 'kyivmetroalerts', 'auto_kiev',
-                                  'ukrpravda_news', 'Korrespondent',
-                                  '5channel', 'VWK668', 'patrolpoliceua', 'ServiceSsu', 'segodnya_life'}
+                                  'ukrpravda_news', 'Korrespondent', '5channel', 'VWK668',
+                                  'patrolpoliceua', 'ServiceSsu', 'segodnya_life'}
 
     city_root_accounts['Barcelona'] = {'TMB_Barcelona':'CAT', 'bcn_ajuntament':'CAT',
-                                       'LaVanguardia':'SPA', 'hola':'SPA', 'diariARA':'CAT', 'elperiodico':'SPA',
-                                       'meteocat':'CAT', 'mossos':'CAT',
+                                       'LaVanguardia':'SPA', 'hola':'SPA', 'diariARA':'CAT',
+                                       'elperiodico':'SPA', 'meteocat':'CAT', 'mossos':'CAT',
                                        'sport':'SPA', 'VilaWeb':'CAT'}
 
     city_root_accounts['Brussels'] = {'STIBMIVB':'B'}
@@ -56,7 +60,7 @@ class RandomWalkCityTweets:
                              'Brussels': ['fr', 'nl', 'en', 'es', 'it', 'de', 'tr', 'pt', 'el', 'da', 'ar'],
                              'Riga': ['lv', 'ru', 'en']}
 
-    def __init__(self, data_file_name, city, city_accounts=None, city_key_words=None, update=False, city_langs=False):
+    def __init__(self, data_file_name, city, city_accounts=None, city_key_words=None, city_langs=False):
         """ Args:
                 * data_file_name: string. Name of database file where data is stored from previous computations.
                     If file name is not found in current directory, a new empty file is created with
@@ -67,50 +71,38 @@ class RandomWalkCityTweets:
                     to recognize the city in different languages or spellings
                 * city_langs: list of strings. Strings must be valid identifiers of languages.
                     Use reference https://en.wikipedia.org/wiki/List_of_ISO_639-2_codes
-                * update: boolean. True if new data is available in database and 'process_data' needs to be called
-                    to create a pandas DataFrame that summarizes all information. Default False
         """
         if not os.path.exists(data_file_name):
             open(data_file_name, 'w+').close()
 
         # initialize key arguments
         self.data_file_name = data_file_name
-        if city in self.city_root_accounts:
-            self.city = city
-        else:
+        # check if city is already in class attributes
+        if city not in self.city_root_accounts:
             if city_accounts:
                 self.city_root_accounts[city] = city_accounts
             else:
-                raise Exception ("If a new city is specified, root accounts for this city "
-                                 "must be provided through 'city_accounts' argument ")
+                raise Exception("If a new city is specified, root accounts for this city "
+                                "must be provided through 'city_accounts' argument ")
             if city_key_words:
                 self.key_words[city] = {'city': city_key_words}
             else:
-                raise Exception (" If a new city is specified, 'city_key_words' arg must be specified  ")
+                raise Exception(" If a new city is specified, 'city_key_words' arg must be specified  ")
             if city_langs:
                 self.langs_for_postprocess[city] = city_langs
             else:
-                raise Exception (" If a new city is specified, 'city_langs' arg must be specified ")
+                raise Exception(" If a new city is specified, 'city_langs' arg must be specified ")
+        self.city = city
 
-        # initialize instance attributes
-        self.unique_flws = None
-        self.tweets_from_followers = None
-        self.av_nodes = None
-        self.data_stats = pd.DataFrame()
-        self.lang_settings_per_root_acc = defaultdict(dict)
-        self.stats_per_root_acc = dict()
+        # initialize instance attributes from database
+        self.load_root_accs_unique_followers()
+        self.load_tweets_from_followers()
+        self.load_available_acc_nodes()
 
         # set_up Twitter API
         auth = OAuthHandler(consumer_key, consumer_secret)
         auth.set_access_token(access_token, access_token_secret)
         self.api = tweepy.API(auth, wait_on_rate_limit=True, wait_on_rate_limit_notify=True)
-
-        if update:
-            self.process_data(max_num_langs=3)
-        else:
-            data_file_path = os.path.join(self.city, self.city + '_data_stats.json')
-            self.data_stats = pd.read_json(data_file_path)
-            self.get_available_nodes()
 
     def get_account_network(self, root_account_name, rel_type='followers', max_num=100,
                             min_num_tweets=60, min_num_followers=50, only_city=False,
@@ -139,6 +131,7 @@ class RandomWalkCityTweets:
             Returns:
                 * list_users: a list of account_names.
         """
+        # start progress bar
         pbar = pyprind.ProgBar(max_num)
         list_users = []
         # very important to set count=200 MAX VALUE -> Max 3000 accounts per 15 minutes interval
@@ -158,12 +151,12 @@ class RandomWalkCityTweets:
                 if only_city:
                     locs = '|'.join(self.key_words[self.city]['city'])
                 else:
-                    locs = '|'.join(self.key_words[self.city]['country'] + 
-                                    self.key_words[self.city]['city'])                   
+                    locs = '|'.join(self.key_words[self.city]['country'] +
+                                    self.key_words[self.city]['city'])
                 patt = re.compile(locs)
                 found_loc = re.findall(patt, user._json['location'])
                 if (found_loc and user.statuses_count >= min_num_tweets and
-                    not user.protected and user.followers_count >= min_num_followers):
+                        not user.protected and user.followers_count >= min_num_followers):
                     user._json.update({'cursor_id': cursor.iterator.next_cursor})
                     if avoid_repeat:
                         if user._json['screen_name'] not in avoid_repeat:
@@ -179,7 +172,7 @@ class RandomWalkCityTweets:
                     time.sleep(3)
                 else:
                     time.sleep(60 * 16)
-                    continue #user = next(users)
+                    continue  # user = next(users)
             except StopIteration:
                 break
             tmp_flws = pd.DataFrame(list_users)
@@ -201,7 +194,7 @@ class RandomWalkCityTweets:
             else:
                 df_old = df_old.append(df_new, ignore_index=True)
                 df_old.to_hdf(self.data_file_name, node)
-                
+
         return list_users
 
     def get_account_tweets(self, id_account, max_num_twts=60):
@@ -282,7 +275,7 @@ class RandomWalkCityTweets:
             df_tweets['tweets'] = df_tweets['tweets'].str.replace(r"[^\w\s'’,.!?]+", " ")
             df_tweets['lang_detected'] = df_tweets['tweets'].apply(self.detect_refined)
         else:
-            print ('There are no new tweets left to be retrieved. All remaining ones are protected')
+            print('There are no new tweets left to be retrieved. All remaining ones are protected')
             return
 
         if save:
@@ -290,7 +283,8 @@ class RandomWalkCityTweets:
                 df_tweets.to_hdf(self.data_file_name,
                                  '/'.join(['', self.city, 'tweets_from_followers']))
             else:
-                with pd.HDFStore('city_random_walks.h5') as f:
+                data_path = os.path.join('data', 'city_random_walks.h5')
+                with pd.HDFStore(data_path) as f:
                     nodes = f.keys()
                 ixs_saved_walks = []
                 pattern = r"".join([self.city, "/random_walk_", "(\d+)"])
@@ -309,44 +303,61 @@ class RandomWalkCityTweets:
         else:
             return df_tweets
 
-    def get_pcts_resids_per_acc(self, sample_size=6000):
+    def get_num_flws_per_acc(self):
+        """
+            Stream and save number of followers of each root account from Twitter
+            Output:
+                * pandas series with number of followers per each account saved to database
+        """
+        # define database node name to store num_flws_per_acc
+        node = "/".join(['', self.city, 'num_flws_main_accs'])
+        num_flws_per_acc = {}
+        for acc in self.city_root_accounts[self.city]:
+            acc_info = self.api.get_user(acc)
+            num_flws_per_acc[acc] = acc_info.followers_count
+        # make pandas series and save to hdf
+        num_flws_per_acc = pd.Series(num_flws_per_acc)
+        num_flws_per_acc.to_hdf(self.data_file_name, node)
+
+    def get_pct_resids_per_acc(self, sample_size=6000):
         """
             Method to quantify proportion of root account followers
-            that are explicit city residents
+            that are explicit city residents. It provides an estimate based on
+            average proportion from the sample size
             Args:
                 * sample_size: integer. Number of followers to stream to build the sample
                     to estimate the percentage of residents per account
+            Output:
+                * Method saves a pandas Series with account names as index and
+                    percentages as values to a database node
         """
         pct_residents_per_acc = {}
-        if not self.av_nodes:
+        if not self.av_acc_nodes:
             self.get_available_nodes()
-        for root_account in self.av_nodes:
+        for root_account in self.av_acc_nodes:
             list_resid_flws = self.get_account_network(root_account, max_num=sample_size, only_city=True)
             pct_residents_per_acc[root_account] = len(list_resid_flws) / sample_size
         pct_residents_per_acc = pd.Series(pct_residents_per_acc)
         node = "/".join(['', self.city, 'pct_resid_root_accs'])
         pct_residents_per_acc.to_hdf(self.data_file_name, node)
-        return pct_residents_per_acc
 
-        # TODO : how to store proportion per account until all props are available ??
-
-    
     def filter_root_accs_unique_followers(self, save=True, min_num_flws_per_acc=50,
                                           min_num_twts_per_acc=60, twts_to_flws_ratio=30):
         """
             Method to read followers from all already-computed root-account nodes and
-            then compute a list of all unique followers for a given city
+            then compute a list of all unique followers for a given city. Method filters out those users
+            that do not meet the specified conditions in terms of minimum followers and tweets per account
             Args:
-                * save: boolean. If True, followers are saved to hdf file. Default True
-                * min_num_flws_per_acc: integer. Minimum number of followers an account
+                * save: boolean. If True, filtered followers are saved to hdf file. Default True
+                * min_num_flws_per_acc: integer. Minimum number of followers a user
                     needs to have in order to consider it relevant. Default 50
-                * min_num_twts_per_acc: integer. Minimum number of times an account
+                * min_num_twts_per_acc: integer. Minimum number of times a user
                     needs to have tweeted in order to consider it relevant. Default 60
                 * twts_to_flws_ratio: integer. Maximum allowed ratio of the number of tweets
-                    published by account to the number of followers the account has.
+                    published by user to the number of followers the same user has.
                     This ratio is a measure of impact. Defaults to 30
             Output:
-                * Unique followers are stored in instance attribute self.unique_flws. If requested,
+                * Unique followers are stored in instance attribute 'unique_flws'. If requested,
                     they are also saved to '/unique_followers' name
         """
         filter_words = '|'.join(self.key_words[self.city]['city'])
@@ -357,7 +368,7 @@ class RandomWalkCityTweets:
             for n in f.keys():
                 if re.findall(pattern, n):
                     df = pd.read_hdf(f, n)
-                    df = df[(df['followers_count'] > min_num_flws_per_acc) & 
+                    df = df[(df['followers_count'] > min_num_flws_per_acc) &
                             (df['statuses_count'] / df['followers_count'] < twts_to_flws_ratio) &
                             (df['location'].str.contains(filter_words)) &
                             (df['statuses_count'] >= min_num_twts_per_acc) &
@@ -367,29 +378,6 @@ class RandomWalkCityTweets:
             if save:
                 self.unique_flws.to_hdf(self.data_file_name,
                                         '/'.join(['', self.city, 'unique_followers']))
-                
-    def load_root_accs_unique_followers(self):
-        """
-            Load all root accounts' unique followers from hdf file and assign them to class attribute
-            as a pandas Dataframe object
-            Output:
-                * Unique followers are saved to self.unique_flws instance attribute
-        """
-        self.unique_flws = pd.read_hdf(self.data_file_name,
-                                       '/'.join(['', self.city, 'unique_followers']))
-
-    def get_available_nodes(self):
-        """ Method to load all nodes available in saved database.
-            Output:
-                * Resulting nodes will be saved as an instance attribute in self.av_nodes
-        """
-        with pd.HDFStore(self.data_file_name) as f:
-            self.av_nodes = []
-            pattern = r"".join([self.city, '/(\w+)', '/followers'])
-            for n in f.keys():
-                acc = re.findall(pattern, n)
-                if acc and acc[0] in self.city_root_accounts[self.city]:
-                    self.av_nodes.append(acc[0])
 
     def update_tweets_from_followers(self):
         """ Download tweets from newly detected followers and append them to saved data """
@@ -416,49 +404,55 @@ class RandomWalkCityTweets:
         else:
             self.get_tweets_from_followers(all_flws, save=True)
 
-    def load_tweets_from_followers(self, filter=True):
-        """ """
-        tff = pd.read_hdf(self.data_file_name,
-                          '/'.join(['', self.city, 'tweets_from_followers']))
-        langs = self.langs_for_postprocess[self.city]
-        if filter:
-            if self.city == 'Barcelona':
-                tff.lang[tff.lang == 'und'] = 'ca'
-            tff = tff[tff.lang.isin(langs)]
-            tff = tff[tff.lang == tff.lang_detected]
-        self.tweets_from_followers = tff
-
-    def random_walk(self):
-        """ 
-            Select a list of accounts by randomly walking 
-            all main followers' friends and followers
+    def load_root_accs_unique_followers(self):
         """
-        # load main followers
-        self.load_root_accs_unique_followers()
-        
-        # get random sample from main followers
-        sample = np.random.choice(self.unique_flws['screen_name'], 10, replace=False)
-        
-        # get a random follower and friend from each account from sample 
-        # ( check they do not belong to already met accounts and main followers !!)
-        all_flws = []
-        for acc in sample:
-            # look for friend and follower
-            list_flws = self.get_account_network(acc, min_num_tweets=10,
-                                                 only_city=True,
-                                                 limited_search=True, avoid_repeat=all_flws)
-            all_flws.extend(list_flws)
-            list_friends = self.get_account_network(acc, min_num_tweets=10, 
-                                                    rel_type='friends', only_city=True, 
-                                                    limited_search=True, avoid_repeat=all_flws)
-            all_flws.extend(list_flws)
-        self.random_walk_accounts = pd.DataFrame(all_flws)
-        print('starting to retrieve tweets')
-        self.get_tweets_from_followers(self.random_walk_accounts["id_str"],
-                                       max_num_twts=20, save=True,
-                                       random_walk=True)
+            Method that loads all root accounts' unique followers from database and
+            assigns them to class attribute as a pandas dataframe
+            Output:
+                * pandas dataframe with unique followers is assigned to 'unique_flws' instance attribute
+        """
+        node = '/'.join(['', self.city, 'unique_followers'])
+        try:
+            self.unique_flws = pd.read_hdf(self.data_file_name, node)
+        except KeyError:
+            self.unique_flws = None
 
+    def load_tweets_from_followers(self, filter=True):
+        """
+            Method to load all tweets from followers of all root accounts into a pandas dataframe
+            Args:
+                * filter: boolean. True if only tweets relevant for stats are to be
+                    considered (lang correctly identified, lang is one of the requested ones, ...).
+                    Default True
+            Output:
+                * Assigns dataframe to 'tweets_from_followers' instance attribute. If data is not in
+                    the database, it assigns None
+        """
+        node = '/'.join(['', self.city, 'tweets_from_followers'])
+        try:
+            tff = pd.read_hdf(self.data_file_name, node)
+            langs = self.langs_for_postprocess[self.city]
+            if filter:
+                if self.city == 'Barcelona':
+                    tff.lang[tff.lang == 'und'] = 'ca'
+                tff = tff[tff.lang.isin(langs)]
+                tff = tff[tff.lang == tff.lang_detected]
+            self.tweets_from_followers = tff
+        except KeyError:
+            self.tweets_from_followers = None
 
+    def load_available_acc_nodes(self):
+        """ Method to load all account nodes available in saved database.
+            Output:
+                * Resulting nodes will be saved as an instance attribute in self.av_acc_nodes
+        """
+        with pd.HDFStore(self.data_file_name) as f:
+            self.av_acc_nodes = []
+            pattern = r"".join([self.city, '/(\w+)', '/followers'])
+            for n in f.keys():
+                acc = re.findall(pattern, n)
+                if acc and acc[0] in self.city_root_accounts[self.city]:
+                    self.av_acc_nodes.append(acc[0])
 
     @staticmethod
     def detect_refined(txt):
@@ -466,7 +460,8 @@ class RandomWalkCityTweets:
             Args:
                 * txt : string. Tweet text
             Output:
-                * tweet language or 'Undefined' label if insufficent text is present"""
+                * string with tweet language or 'Undefined' label if insufficient text is present
+        """
         if len(txt.split()) > 2 and len(txt) > 10:
             try:
                 return detect(txt)
@@ -475,40 +470,94 @@ class RandomWalkCityTweets:
         else:
             return 'Undefined'
 
-    def get_num_flws_per_acc(self, force_update=False):
+    def optimize_saving_space(self):
         """
-            Get number of followers per each account of a given city
-            Args:
-                * force_update: boolean. True if number of followers has to be updated and stored
-            Output:
-                * pandas series ( recomputed series saved to database if force_update is True)
+            Method to rewrite hdf data file in order to optimize file size.
+            It creates a new file and deletes old one. It keeps original file name
         """
-        # define database node name to store num_flws_per_acc
-        node = "/".join(['', self.city, 'num_flws_main_accs'])
+        data_path = os.path.join('data', self.data_file_name)
+        with pd.HDFStore(data_path) as f:
+            new_data_path = os.path.join('data', 'new_city_random_walks.h5')
+            for n in f.keys():
+                data = pd.read_hdf(f, n)
+                data.to_hdf(new_data_path, n)
+        os.remove(data_path)
+        os.rename(new_data_path, self.data_file_name)
 
-        if force_update:
-            num_flws_per_acc = {}
-            for acc in self.city_root_accounts[self.city]:
-                acc_info = self.api.get_user(acc)
-                num_flws_per_acc[acc] = acc_info.followers_count
-            # make pandas series and save to hdf
-            num_flws_per_acc = pd.Series(num_flws_per_acc)
 
-            num_flws_per_acc.to_hdf(self.data_file_name, node)
+class ProcessTweetData(StreamTweetData):
+
+    def __init__(self, data_file_name, city, update=False):
+        """
+        Args:
+            * data_file_name: string. Name of database file where data is stored from previous computations.
+                    If file name is not found in current directory, a new empty file is created with
+                    the same specified name
+            * city: string. Name of city where bilingualism is to be analyzed
+            * update: boolean. True if new data is available in database and 'process_data' needs to be called
+                        to create a pandas DataFrame that summarizes all information. Default False
+        """
+        super().__init__(data_file_name, city)
+
+        # set values from saved data
+        self.define_num_resids_per_acc()
+
+        # initialize class-specific instance attributes
+        self.data_stats = pd.DataFrame()
+        self.lang_settings_per_root_acc = defaultdict(dict)
+        self.stats_per_root_acc = dict()
+        self.weighted_samples_distribs = dict()
+
+        if update:
+            self.process_data(max_num_langs=3)
         else:
-            return pd.read_hdf(self.data_file_name, node)
+            data_file_path = os.path.join(self.city, self.city + '_data_stats.json')
+            self.data_stats = pd.read_json(data_file_path)
 
-    def get_num_resids_per_acc(self):
-        node1 = "/".join(['', self.city, 'pct_resid_root_accs'])
-        pct_resids_per_acc = pd.read_hdf(self.data_file_name, node1).sort_index()
-        node2 = "/".join(['', self.city, 'num_flws_main_accs'])
-        num_flws_per_acc = pd.read_hdf(self.data_file_name, node2).sort_index()
-        return pct_resids_per_acc * num_flws_per_acc
+        # compute root accs stats
+        self.compute_stats_per_root_acc(save=False, load_data=True)
+
+    def load_sample_size_per_root_acc(self):
+        """
+            Method to read the number of followers per account RELEVANT
+            for statistic analysis of the languages used in (re)tweets
+        """
+
+        if self.data_stats.empty:
+            try:
+                self.data_stats = pd.read_json(self.city + '_data_stats.json')
+            except ValueError:
+                print('Requested file is not in current directory !')
+        self.sample_size_per_root_acc = {acc: self.data_stats[self.data_stats[acc]].shape[0]
+                                         for acc in self.av_acc_nodes}
+
+    def load_num_flws_per_acc(self):
+        """ Method to load the number of followers for each account """
+        node = "/".join(['', self.city, 'num_flws_main_accs'])
+        return pd.read_hdf(self.data_file_name, node)
+
+    def load_pct_resids_per_acc(self, sample_size=6000):
+        """
+            Method to load average percentage of residents per account
+            It adds standard deviation to each proportion value
+            Output:
+                * returns a two-columns dataframe with the requested data
+        """
+        node = "/".join(['', self.city, 'pct_resid_root_accs'])
+        df = pd.read_hdf(self.data_file_name, node).sort_index().to_frame()
+        df.columns = ['pct_resids']
+        # get standard deviation of each mean proportion
+        df['std_pct_resids'] = df['pct_resids'].apply(proportion.std_prop, args=(sample_size,))
+        return df
 
     def process_data(self, num_tweets_for_stats=40, save=True, max_num_langs=2):
         """
-            Method to post-process tweet data and create a pandas DataFrame
-            that summarizes all information
+            Method that defines a pandas DataFrame that summarizes all language-related information
+            from available tweets. The DataFrame has a column with users id
+            and root account columns with boolean values that define whether users
+            are followers of root account or not. For each user and for each considered language,
+            the average percentage of tweets in the language and the corresponding 95% confidence intervals
+            are calculated, using a sample of tweets of size N = 'num_tweets_for_stats'
 
             Arguments:
                 * num_tweets_for_stats: integer >= 40 and <= 60. Number of tweets that will be taken into
@@ -536,10 +585,9 @@ class RandomWalkCityTweets:
         self.data_stats = self.data_stats.lang.reset_index()
         self.data_stats = self.data_stats[['id_str', 'screen_name'] + langs_selected]
         self.data_stats['tot_lang_counts'] = self.data_stats[langs_selected].sum(axis=1)
-        # get nodes with available tweets
-        self.get_available_nodes()
+
         # generate boolean columns with followers for each account
-        for root_acc in self.av_nodes:
+        for root_acc in self.av_acc_nodes:
             root_acc_ids = pd.read_hdf(self.data_file_name,
                                        '/'.join(['', self.city, root_acc, 'followers'])).id_str
             self.data_stats[root_acc] = self.data_stats.id_str.isin(root_acc_ids)
@@ -564,37 +612,80 @@ class RandomWalkCityTweets:
             data_file = os.path.join(self.city, self.city + '_data_stats.json')
             self.data_stats.to_json(data_file)
 
-    def get_stats_per_root_acc(self, save=True, load_data=False):
+    def compute_stats_per_root_acc(self, save=True, load_data=False):
         """
-            Method to compute basic stats (mean, median, conf intervals ...)
-            for each root account
+            Method to compute basic stats of language use (mean, median and their conf intervals ...)
+            of the sample of followers of each root account
+            Args:
+                * save: boolean. Default True
+                * load_data: boolean
+            Output:
+                * sets value to instance attribute 'stats_per_root_acc'
+
         """
         if load_data:
             try:
-                data_file = os.path.join(self.city, self.city + '_stats_per_root_acc.json')
-                self.stats_per_root_acc = pd.read_json(data_file)
-            except ValueError:
-                print('data file is not available in current directory')
+                data_file = os.path.join(self.city, self.city + '_stats_per_root_acc.pickle')
+                self.stats_per_root_acc = pd.read_pickle(data_file)
+            except FileNotFoundError:
+                print('stats_per_root_acc pickled data file is not available in specified directory')
+                # call method and force stats computation
+                self.compute_stats_per_root_acc(load_data=False)
         else:
             data_frames_per_lang = dict()
             for lang in self.langs_for_postprocess[self.city]:
                 self.stats_per_root_acc = dict()
-                for root_acc in self.av_nodes:
+                for root_acc in self.av_acc_nodes:
                     data = self.data_stats[self.data_stats[root_acc]]
                     if data.shape[0] >= 100:
+                        # compute confint of the mean
                         conf_int = proportion.proportion_confint(data[lang].sum(),
                                                                  data.tot_lang_counts.sum(),
                                                                  method='jeffreys', alpha=0.01)
-                        conf_int = pd.Series(conf_int, index=['min_confint', 'max_confint'])
+                        mean_conf_int = pd.Series(conf_int,
+                                             index=['min_confint', 'max_confint'])
+                        # compute confint of the median
+                        median_conf_int = pd.Series(self.compute_median_conf_int(root_acc, lang),
+                                                    index=['median_inf', 'median_sup'])
+                        # merge mean and median confidence intervals
+                        conf_int = mean_conf_int.append(median_conf_int)
+
                         self.stats_per_root_acc[root_acc] = (data[lang] / data.tot_lang_counts).describe().append(conf_int)
                 data_frames_per_lang[lang] = pd.DataFrame(self.stats_per_root_acc).transpose()
             self.stats_per_root_acc = pd.concat(data_frames_per_lang, axis=1)
 
             if save:
-                data_file_path = os.path.join(self.city, self.city + '_stats_per_root_acc.json')
-                self.stats_per_root_acc.reset_index().to_json(data_file_path)
+                data_file_path = os.path.join(self.city, self.city + '_stats_per_root_acc.pickle')
+                self.stats_per_root_acc.to_pickle(data_file_path)
 
-    def get_lang_settings_stats_per_root_acc(self, city_only=True):
+    def define_num_resids_per_acc(self):
+        """
+        Method to obtain estimate of number of explicit residents in city per each account
+        Args:
+            * update: boolean. If False, method loads already available results
+        Output:
+            * Method assigns 4-columns pandas dataframe to instance attribute 'num_resids_per_acc'
+        """
+
+        self.num_resids_per_acc = self.load_num_flws_per_acc().to_frame()
+        self.num_resids_per_acc.columns = ['flws']
+        # join number of followers followers with mean percentage of residents and its stdev
+        self.num_resids_per_acc = self.num_resids_per_acc.join(self.load_pct_resids_per_acc())
+        self.num_resids_per_acc['avg_resids'] = (self.num_resids_per_acc['flws'] *
+                                                 self.num_resids_per_acc['pct_resids'])
+
+    def compute_rand_num_resids_per_acc(self):
+        """
+            Method to compute a random sample of the number of city residents
+            per account using mean value and its standard error
+            Output:
+                * pandas Series with random number of residents per account
+        """
+        random_sample = np.random.normal(self.num_resids_per_acc['pct_resids'],
+                                         self.num_resids_per_acc['std_pct_resids'])
+        return random_sample * self.num_resids_per_acc['flws']
+
+    def compute_lang_settings_stats_per_root_acc(self, city_only=True):
         """ Find distribution of lang settings for each root account
             and , if requested, for users residents in the city only
             Args:
@@ -604,15 +695,13 @@ class RandomWalkCityTweets:
                 * sets value to instance attribute 'lang_settings_per_root_acc'
         """
         # TODO: group data by lang using hierarchical columns instead of column suffix
-        # get nodes if not available
-        if not self.av_nodes:
-            self.get_available_nodes()
 
         stats_per_lang = dict()
         acc_data = defaultdict(dict)
-        for root_acc in self.av_nodes:
+        for root_acc in self.av_acc_nodes:
             node = "/".join([self.city, root_acc, 'followers'])
-            df = pd.read_hdf('city_random_walks.h5', node)
+            data_path = os.path.join('data', 'city_random_walks.h5')
+            df = pd.read_hdf(data_path, node)
             if city_only:
                 df = df[df.location.str.contains("|".join(self.key_words[self.city]['city']))]
             counts = df.lang.value_counts()
@@ -631,76 +720,298 @@ class RandomWalkCityTweets:
 
         self.lang_settings_per_root_acc = pd.concat(stats_per_lang, axis=1)
 
-    def get_sample_size_per_root_acc(self, print_sizes=False):
-        """ Method to read number of relevant followers per account
-            for statistic analysis of (re)tweets languages
-            Args:
-                * print_sizes: boolean. False if no printing of results is required
+    def quantify_accs_similarity(self, ref_key, other_key, min_size=50):
         """
-        if not self.av_nodes:
-            self.get_available_nodes()
-        if self.data_stats.empty:
-            try:
-                self.data_stats = pd.read_json(self.city + '_data_stats.json')
-            except ValueError:
-                print('Requested file is not in current directory !')
-
-        self.sample_size_per_root_acc = {acc: self.data_stats[self.data_stats[acc]].shape[0]
-                                         for acc in self.av_nodes}
-        if print_sizes:
-            for acc in self.av_nodes:
-                self.sample_size_per_root_acc
-                print(acc, self.data_stats[self.data_stats[acc]].shape[0])
-
-    def get_common_pct(self, ref_key, other_key):
-        """ Get degree of similarity between follower sample of ref_key account
-            as compared to other_acc : percentage of common followers relative to reference
-            account
+            Method to compute the degree of similarity between followers of ref_key account
+            as compared to those of another account specified in 'other_key'. It computes the
+            percentage of common followers relative to reference account
         """
-        s_ref = set(self.data_stats[self.data_stats[ref_key]].id_str)
-        s2 = set(self.data_stats[self.data_stats[other_key]].id_str)
-        s_int = s_ref.intersection(s2)
-        return len(s_int) / len(s_ref)
+        # estimate accounts' relative sizes
+        resids_per_acc = self.num_resids_per_acc['avg_resids']
+        relat_sizes = resids_per_acc / resids_per_acc[resids_per_acc.argmin()]
 
-    def get_weighted_sample(self, rand_seed=42, min_size=100):
+        s_ref = set(np.random.choice(self.data_stats[self.data_stats[ref_key]].id_str,
+                                     size=int(min_size*relat_sizes[ref_key]), replace=False))
+        s_other = set(np.random.choice(self.data_stats[self.data_stats[other_key]].id_str,
+                                       size=int(min_size*relat_sizes[other_key]), replace=False))
+        s_int = s_ref.intersection(s_other)
+        return len(s_int) / min_size
+
+    def compute_sample_size_per_acc(self, min_size=100, use_obs_weight=True, rand_seed=42):
+        # set random seed
+        np.random.seed(rand_seed)
+        # Scale num residents of each account relative to account with the least residents ( divide by num residents
+        # of the account with the least residents )
+        if use_obs_weight:
+            resids_per_acc = self.num_resids_per_acc['avg_resids']
+        else:
+            resids_per_acc = self.compute_rand_num_resids_per_acc()
+        sample_size_per_acc = (min_size * resids_per_acc /
+                               resids_per_acc[resids_per_acc.argmin()]).astype(int)
+        return sample_size_per_acc.sort_values()
+
+    def compute_intersection_users(self, min_size=100, rand_seed=42):
         """
-            Get a random weighted sample of followers from all accounts.
-            Each account will contribute with a sample of followers.
-            A minimum of 100 followers is considered for the least popular account.
+            Method to identify users that are followers of n different accounts,
+            where 2 <= n <= max_num_accounts
+        """
+        # get sorted sizes
+        sample_sizes = self.compute_sample_size_per_acc(min_size=min_size, rand_seed=rand_seed)
+        samples_dict = OrderedDict()
+        for acc, size in sample_sizes.iteritems():
+            sample = self.data_stats[self.data_stats[acc]].id_str.sample(size)
+            samples_dict[acc] = sample
+        # Initialize dict where keys are number of sets and values are sets of unique ids
+        # that define intersection of accs followers
+        intersec_users = dict()
+        num_accs = len(self.av_acc_nodes)
+        # iterate over all possible combination sizes
+        for comb_size in range(2, num_accs):
+            intersec_users[comb_size] = set()
+            # iterate over all possible combinations
+            for tup in itertools.combinations(samples_dict.values(), comb_size):
+                tup = [set(x) for x in tup]
+                intersec_users[comb_size].update(set.intersection(*tup))
+        return intersec_users
+
+    def compute_weighted_sample_users(self, rand_seed=42, min_size=100, use_obs_weight=False):
+        """
+            Method to obtain a weighted sample of followers from all accounts, where the weight
+            is determined by the relative proportion of city residents of each account.
+            Each account contributes with a sample of followers and the size of each subsample is
+            determined by the relative weight of the account.
+            A minimum of 'min_size' followers is considered for the least popular account.
             Rest of accounts sample sizes are computed multiplying the minimum size
-            by a factor that is the ratio of resident followers with respect to the least
-            popular account in the city
+            by a factor that is the ratio of the number of resident followers of each root account
+            to that of the least popular root account in the city.
             Args:
                 * rand_seed: integer. Seed to reproduce random sampling
                 * min_size: minimum sample size from the account with least residents
+                * use_obs_weight: boolean. True if weights are to be computed based on average residents per account,
+                    false if residents per account are to be considered a random variable that has to be sampled
+                    every time the function is called
+            Output:
+                * numpy array of unique ids of weighted sample
         """
+
+        # set random seed
         np.random.seed(rand_seed)
-        num_res_per_acc = self.get_num_resids_per_acc()
-        sample_size_per_acc = (min_size * num_res_per_acc / num_res_per_acc[num_res_per_acc.argmin()]).astype(int)
 
-        # construct global weighted sample of users ids
+        # Scale num residents of each account relative to account with the least
+        # residents ( divide by num of residents of the account with the least residents)
+        sample_size_per_acc = self.compute_sample_size_per_acc(min_size=min_size,
+                                                               use_obs_weight=use_obs_weight)
+        if not hasattr(self, 'sample_size_per_root_acc'):
+            self.load_sample_size_per_root_acc()
+        av_sample_size_per_acc = pd.Series(self.sample_size_per_root_acc)
+        # define convenience dataframe for iteration purposes
+        df = pd.concat([sample_size_per_acc, av_sample_size_per_acc], axis=1)
+        df.columns = ['req_sample_size', 'av_sample_size']
+        # sort by size of available samples
+        df = df.sort_values('av_sample_size')
+
+        # construct stratified sample of users ids
+        # by iterating over increasingly larger available samples
+        # remove redundant ids in order to sample them only once
         ids_weighted_sample = []
-        for (acc, sample_size) in sample_size_per_acc.iteritems():
-            acc_sample = self.data_stats[self.data_stats[acc]].sample(sample_size).id_str
+        for ix, (acc, cols) in enumerate(df.iterrows()):
+            sample_size = cols['req_sample_size']
+            if not ix:
+                # first available sample from sorted iterator can be fully sampled
+                acc_sample = self.data_stats[self.data_stats[acc]].sample(sample_size).id_str
+            else:
+                # already sampled users must be removed from subsequent available samples
+                # get list of previous sets
+                list_previous_sets = [set(self.data_stats[self.data_stats[pr_acc]].id_str)
+                                      for pr_acc, _ in df.iloc[:ix].iterrows()]
+                # get union of previous sets
+                previous_sets = set().union(*list_previous_sets)
+                # get difference of current set with previous sets
+                curr_set = set(self.data_stats[self.data_stats[acc]].id_str)
+                rem_set = curr_set.difference(previous_sets)
+                # reduce sample size after removal of estimated intersection with previous sets
+                pct_intersec = 1 - len(rem_set) / len(curr_set)
+                sample_size = int(sample_size * (1 - pct_intersec))
+                mask = self.data_stats[acc] & self.data_stats.id_str.isin(rem_set)
+                acc_sample = self.data_stats[mask].sample(sample_size).id_str
             ids_weighted_sample.extend(acc_sample)
-        ids_weighted_sample = np.unique(ids_weighted_sample)
 
+        # ids_weighted_sample = np.unique(ids_weighted_sample)
         return ids_weighted_sample
 
-    def get_weighted_distribution(self, lang, rand_seed=42, min_size=100):
+    def compute_weighted_sample_props(self, lang, rand_seed=42, min_size=100, use_obs_weight=False):
         """
-            Method to obtain distribution of weighted users for a given lang
+            Method to obtain, for a given lang, the weighted distribution of users' lang proportions
             Args:
-                lang: string. Use same code as in rest of module
-                rand_seed: positive integer. Seed to reproduce random sample
-                min_size: positive integer. Minimum sample size from the account with least residents
+                * lang: string. Use same code as in rest of module
+                * rand_seed: positive integer. Seed to reproduce random sample
+                * min_size: positive integer. Minimum sample size from the account with least residents
+                * use_obs_weight: boolean. True if weights are to be computed based on average residents per account,
+                    False if residents per account are to be considered a random variable that has to be sampled
+                    every time the function is called
+            Output:
+                * pandas Series with percentage values of language use for selected followers
         """
-
         # get random weighted sample
-        weighted_sample = self.get_weighted_sample(rand_seed=rand_seed, min_size=min_size)
+        users = self.compute_weighted_sample_users(rand_seed=rand_seed, min_size=min_size,
+                                                   use_obs_weight=use_obs_weight)
         # get mean column for specified language
         df_column = '{}_mean'.format(lang)
-        return self.data_stats.loc[self.data_stats.id_str.isin(weighted_sample)][df_column]
+        return self.data_stats.loc[self.data_stats.id_str.isin(users)][df_column]
+
+    def compute_stats_props_distrib(self, lang, distrib=None):
+        """
+            Method that computes, for a given language, the median and mean user of a given 1D distribution or
+            collection of 1D lang proportions distributions, as well as percentage of users that mostly use
+            the requested languages.
+            Args:
+                * lang: string. Language for which stats are requested
+                * distrib: numpy array (1D or 2D). Collection of language proportions that define a distribution.
+                    If None, the weighted distribution from all accounts with average residents is considered.
+                    Default None
+            Output:
+                * numpy array with the following ordered values for each column:
+                   - percentage of use of the requested language made by median user of the weighted distribution
+                   - percentage of use of the requested language made by average user of the weighted distribution
+                   - percentage of users of the weighted distribution that mostly use the requested language
+                   - percentage of users that use the requested language as much as other languages
+        """
+        if distrib is None:
+            distrib = self.compute_weighted_sample_props(lang, use_obs_weight=True)
+
+        if distrib.ndim == 2:
+            median = np.median(distrib, axis=1)
+            mean = np.mean(distrib, axis=1)
+            pct_more_in_lang = 100 * (distrib >= 0.55).sum(axis=1) / distrib.shape[1]
+            pct_as_much_in_lang = 100 * ((distrib >= 0.45) & (distrib < 0.55)).sum(axis=1) / distrib.shape[1]
+            stats = np.column_stack((median, mean, pct_more_in_lang, pct_as_much_in_lang))
+        else:
+            median = np.median(distrib)
+            mean = np.mean(distrib)
+            pct_more_in_lang = 100 * (distrib >= 0.55).sum() / distrib.shape[0]
+            pct_as_much_in_lang = 100 * ((distrib >= 0.45) & (distrib < 0.55)).sum() / distrib.shape[0]
+            stats = np.array([median, mean, pct_more_in_lang, pct_as_much_in_lang])
+
+        return stats
+
+    def compute_median_conf_int(self, acc, lang, num_samples=1000, n=40):
+
+        """
+            Method to obtain, for a specified language and account, the distribution of the median
+            language choice of the account followers'. A 95% confidence interval is calculated
+            Args:
+                * acc: string. Name of root account
+                * lang: string. Language for which the median is to be estimated
+                * num_samples: integer. Number of samples to be generated for each proportion value
+                * n: integer. Number of available tweets per user
+
+        """
+        # TODO: if no account specified, apply procedure to weighted sample ( get weighted sample)
+
+        # get computed proportions from followers for given account
+        props = self.data_stats[self.data_stats[acc]][lang + "_mean"].values
+        # knowing size is always n = 40, get standard error of the proportion for each account follower
+        stds = proportion.std_prop(props, n)
+        # generate new props using mean and std for each follower (assuming normal distrib)
+        generated_props = np.random.normal(props, stds, size=(num_samples, props.size))
+        # compute medians of each generated sample ( need to clip if generated values
+        # are less than zero or more than one)
+        generated_medians = np.median(np.clip(generated_props, 0, 1), axis=1)
+        # compute confidence interval 95%
+        mean_medians = np.mean(generated_medians)
+        std_medians = np.std(generated_medians)
+        return mean_medians - 1.96 * std_medians, mean_medians + 1.96 * std_medians
+
+    def resample_weighted_sample(self, num_w_samps=100, num_props_samps=100, min_size=100, n=40):
+        """
+            Method to simulate (num_resid_props_samples * num_lang_props_samples) random samples
+            of the weighted distribution of language proportions.
+            For each user/followers and using the central limit theorem,
+            observed lang proportions and their corresponding standard errors are used
+            as the parameters of normal distributions from which we can generate samples
+            both for each proportion and for each relevant lang.
+
+            Account relative weights as well as language use proportions for each follower
+            are repeatedly sampled using normal approximation of sample mean distribution.
+
+            Observed lang proportions and their standard deviations are used
+            to generate a normal distribution for each proportion and for each relevant lang
+
+
+            Args:
+                * num_w_samps: integer. Requested number of resamples of accounts' weights
+                * num_props_samps: integer. Requested number of resamples for each follower language proportion
+                * min_size: integer. Minimum size of the smallest sample (because of limited number of
+                    available followers per root account, resample weights need to scale and fit with respect
+                    to changing relative sizes. If the requested size of the least important account at each
+                    resample is too high, there might not be sufficient available followers for the most relevant
+                    account, i.e those with higher weights )
+                * n: integer. Number of tweets available to estimate proportion of language use per user.
+                    Defaults to 40
+            Output:
+                * assigns result of num_w_samps * num_props_samps experiments to a pandas DataFrame
+                 with 4 columns : median, mean, pct_more_in_lang, pct_as_much_in_lang.
+                 The 'weighted_samples_distribs' instance attribute value is set to the DataFrame value,
+                 with a different key for each language
+        """
+
+        for lang in self.langs_for_postprocess[self.city][:3]:
+            list_w_samps = []
+            for seed in np.random.randint(10000, size=num_w_samps):
+                # get sample of the weighted distribution of lang proportions for a given seed
+                props = self.compute_weighted_sample_props(lang, rand_seed=seed,
+                                                           min_size=min_size).values
+                # compute standard error for each estimated proportion from sample ratio and sample size n
+                std_errs = proportion.std_prop(props, n)
+                # simulate new probabilistic proportions using central limit theorem
+                generated_props = np.random.normal(props, std_errs, size=(num_props_samps, props.size))
+                #
+                stats = self.compute_stats_props_distrib(lang, distrib=generated_props)
+
+                list_w_samps.append(stats)
+
+            distribs = np.concatenate(list_w_samps)
+            self.weighted_samples_distribs[lang] = pd.DataFrame(distribs,
+                                                                columns=['medians', 'means',
+                                                                         'pct_more_in_lang', 'pct_as_much_in_lang'])
+        self.weighted_samples_distribs = pd.concat(self.weighted_samples_distribs, axis=1)
+
+    def random_walk(self):
+        """
+            Select a list of accounts by randomly walking
+            all main followers' friends and followers
+        """
+        # load main followers
+        self.load_root_accs_unique_followers()
+
+        # get random sample from main followers
+        sample = np.random.choice(self.unique_flws['screen_name'], 10, replace=False)
+
+        # get a random follower and friend from each account from sample
+        # ( check they do not belong to already met accounts and main followers !!)
+        all_flws = []
+        for acc in sample:
+            # look for friend and follower
+            list_flws = self.get_account_network(acc, min_num_tweets=10,
+                                                 only_city=True,
+                                                 limited_search=True, avoid_repeat=all_flws)
+            all_flws.extend(list_flws)
+            list_friends = self.get_account_network(acc, min_num_tweets=10,
+                                                    rel_type='friends', only_city=True,
+                                                    limited_search=True, avoid_repeat=all_flws)
+            all_flws.extend(list_flws)
+        self.random_walk_accounts = pd.DataFrame(all_flws)
+        print('starting to retrieve tweets')
+        self.get_tweets_from_followers(self.random_walk_accounts["id_str"],
+                                       max_num_twts=20, save=True,
+                                       random_walk=True)
+
+
+class PlotTweetData(ProcessTweetData):
+
+    def __init__(self, data_file_name, city=None):
+        super().__init__(data_file_name, city)
+        mpl.rcParams['figure.figsize'] = (15, 10)
 
     def plot_flws_resids_per_acc(self):
         """
@@ -712,10 +1023,10 @@ class RandomWalkCityTweets:
 
         # define plot data
         # get idxs to sort accs by num residents
-        arg_sorted = self.get_num_resids_per_acc().argsort()
+        arg_sorted = self.num_resids_per_acc['avg_resids'].argsort()
         # sort data
-        num_flws_per_acc = self.get_num_flws_per_acc().iloc[arg_sorted]
-        num_resids_per_acc = self.get_num_resids_per_acc().iloc[arg_sorted]
+        num_flws_per_acc = self.load_num_flws_per_acc().iloc[arg_sorted]
+        num_resids_per_acc = self.num_resids_per_acc['avg_resids'].iloc[arg_sorted]
         data = [num_flws_per_acc, num_resids_per_acc]
 
         # define plot
@@ -727,16 +1038,18 @@ class RandomWalkCityTweets:
         X = np.arange(0, 2 * num_flws_per_acc.size, 2)
         labels = ['num_flws', 'num_resid_flws']
         errors_flag = [False, True]
-        
+
         # define errors for resident estimates
-        node1 = "/".join(['', self.city, 'pct_resid_root_accs'])
-        pct_resids_per_acc = pd.read_hdf(self.data_file_name, node1).sort_index()
+
+        # node1 = "/".join(['', self.city, 'pct_resid_root_accs'])
+        # pct_resids_per_acc = pd.read_hdf(self.data_file_name, node1).sort_index()
+
         df_errors = pd.DataFrame({key: proportion.proportion_confint(val * 6000, 6000)
-                                  for key, val in pct_resids_per_acc.iteritems()}).T
+                                  for key, val in self.pct_resids_per_acc.iteritems()}).T
         df_errors.columns = ['min_confint', 'max_confint']
-        df_errors = df_errors.iloc[arg_sorted].mul(self.get_num_flws_per_acc().iloc[arg_sorted], axis=0)
-        errors = df_errors['max_confint'].subtract(self.get_num_resids_per_acc(), axis=0).iloc[arg_sorted]
-        
+        df_errors = df_errors.iloc[arg_sorted].mul(self.load_num_flws_per_acc().iloc[arg_sorted], axis=0)
+        errors = df_errors['max_confint'].subtract(self.num_resids_per_acc['avg_resids'], axis=0).iloc[arg_sorted]
+
         for i, (data, frame, color, label, plot_error) in enumerate(zip(data, frames, colors, labels, errors_flag)):
             if plot_error:
                 error = errors.values
@@ -746,7 +1059,6 @@ class RandomWalkCityTweets:
             else:
                 frame.bar(X + i * bar_width, data, align='center', edgecolor='black', color=color,
                           width=bar_width, label=label)
-
 
         # set up axis1
         labels_font_size = 8
@@ -800,7 +1112,7 @@ class RandomWalkCityTweets:
                 * single_account: boolean. If True, plot will be for a single root account only
         """
 
-        self.get_lang_settings_stats_per_root_acc(city_only=city_only)
+        self.compute_lang_settings_stats_per_root_acc(city_only=city_only)
         # set plot style
         mpl.style.use('seaborn')
 
@@ -850,7 +1162,6 @@ class RandomWalkCityTweets:
             fig, ax = plt.subplots()
 
             for i, lang in enumerate(self.langs_for_postprocess[self.city][:max_num_langs]):
-
                 plot_data = self.lang_settings_per_root_acc[lang][self.lang_settings_per_root_acc[lang].num_accs >=
                                                                   min_num_accs]
                 X = np.arange(0, 2 * plot_data.index.shape[0], 2)
@@ -885,7 +1196,7 @@ class RandomWalkCityTweets:
                 * single_account: boolean. True if data is for a single account only. Default False.
         """
         if not isinstance(self.stats_per_root_acc, pd.DataFrame):
-            self.get_stats_per_root_acc()
+            self.compute_stats_per_root_acc()
 
         if single_account:
             bar_width = 0.6
@@ -963,7 +1274,7 @@ class RandomWalkCityTweets:
             of tweets in each language from followers of each root account
         """
         if not isinstance(self.stats_per_root_acc, pd.DataFrame):
-            self.get_stats_per_root_acc()
+            self.compute_stats_per_root_acc()
         # get relevant root accounts sorted by mean value
         lang_to_sort_by = self.langs_for_postprocess[self.city][0]
         ticks_labels = self.stats_per_root_acc[lang_to_sort_by].sort_values(by='mean').index.tolist()
@@ -976,14 +1287,10 @@ class RandomWalkCityTweets:
                 acc_data = (acc_data[lang] / acc_data.tot_lang_counts).values
                 data[lang].append(acc_data)
 
-        def set_box_color(bp, color):
-            plt.setp(bp['boxes'], color=color)
-            #plt.setp(bp['whiskers'], color=color)
-            plt.setp(bp['caps'], color=color)
-            #plt.setp(bp['medians'], color=color)
+
 
         mpl.style.use('seaborn')
-        #plt.figure()
+        # plt.figure()
 
         fig, ax = plt.subplots()
 
@@ -992,18 +1299,24 @@ class RandomWalkCityTweets:
 
         bar_width = 0.5
         tick_dist = 4
-        #colors = ['#D7191C', '#2C7BB6']
+        # colors = ['#D7191C', '#2C7BB6']
         colors = ['green', 'blue']
         bpl = ax.boxplot(data_a, positions=np.array(range(len(data_a))) * tick_dist - bar_width,
-                          sym='', widths=bar_width, showmeans=True, patch_artist=True,
-                          whiskerprops=dict(linestyle='--', linewidth=0.5, alpha=0.5),
-                          medianprops=dict(linewidth=2, color='black'),
-                          meanprops=dict(marker="o", markeredgecolor ='black', markerfacecolor="None"))
+                         sym='', widths=bar_width, showmeans=True, patch_artist=True,
+                         whiskerprops=dict(linestyle='--', linewidth=0.5, alpha=0.5),
+                         medianprops=dict(linewidth=2, color='black'),
+                         meanprops=dict(marker="o", markeredgecolor='black', markerfacecolor="None"))
         bpr = ax.boxplot(data_b, positions=np.array(range(len(data_b))) * tick_dist + bar_width,
-                          sym='', widths=bar_width, showmeans=True, patch_artist=True,
-                          whiskerprops=dict(linestyle='--', linewidth=0.5, alpha=0.5),
-                          medianprops=dict(linewidth=2, color='black'),
-                          meanprops=dict(marker="o", markeredgecolor ='black', markerfacecolor="None"))
+                         sym='', widths=bar_width, showmeans=True, patch_artist=True,
+                         whiskerprops=dict(linestyle='--', linewidth=0.5, alpha=0.5),
+                         medianprops=dict(linewidth=2, color='black'),
+                         meanprops=dict(marker="o", markeredgecolor='black', markerfacecolor="None"))
+
+        def set_box_color(bp, color):
+            plt.setp(bp['boxes'], color=color)
+            # plt.setp(bp['whiskers'], color=color)
+            plt.setp(bp['caps'], color=color)
+            # plt.setp(bp['medians'], color=color)
         set_box_color(bpl, colors[0])
         set_box_color(bpr, colors[1])
 
@@ -1045,6 +1358,7 @@ class RandomWalkCityTweets:
                 * num_bins: integer. Number of bins of the histograms. Default 20
                 * alpha: 0 < float < 1. Matplotlib transparency parameter
                 * max_num_langs: integer <= 3. Number of languages under consideration. Default 2
+                * min_size: integer. minimum size of account with the least residents
         """
         mpl.style.use('seaborn')
         langs = self.langs_for_postprocess[self.city][:max_num_langs]
@@ -1052,9 +1366,10 @@ class RandomWalkCityTweets:
         if account:
             data = self.data_stats[self.data_stats[account]]
         else:
-            data = pd.DataFrame({'{}_mean'.format(langs[0]): self.get_weighted_distribution(langs[0], min_size=min_size).values,
-                                 '{}_mean'.format(langs[1]): self.get_weighted_distribution(langs[1], min_size=min_size).values,
-                                 '{}_mean'.format(langs[2]): self.get_weighted_distribution(langs[2], min_size=min_size).values})
+            data = pd.DataFrame(
+                {'{}_mean'.format(langs[0]): self.compute_weighted_sample_props(langs[0], min_size=min_size).values,
+                 '{}_mean'.format(langs[1]): self.compute_weighted_sample_props(langs[1], min_size=min_size).values,
+                 '{}_mean'.format(langs[2]): self.compute_weighted_sample_props(langs[2], min_size=min_size).values})
 
         fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
         for lang, color in zip(langs, colors):
@@ -1097,53 +1412,158 @@ class RandomWalkCityTweets:
 
         plt.show()
 
-    def optimize_saving_space(self):
-        """
-            Method to rewrite hdf data file in order to optimize file size.
-            It creates a new file and deletes old one. It keeps original file name
-        """
-        with pd.HDFStore(self.data_file_name) as f:
-            for n in f.keys():
-                data = pd.read_hdf(f, n)
-                data.to_hdf('new_city_random_walks.h5', n)
-        os.remove(self.data_file_name)
-        os.rename('new_city_random_walks.h5', self.data_file_name)
+    def plot_weighted_sample_stats(self, min_size=25):
+        """ """
 
-    def weighted_avg_lang_preference(self):
-        """ Find pct of followers that prefer a given language per account and
-            compute weighted average of those percentages to have an etimate of the entire population
-        """
+        if not isinstance(self.weighted_samples_distribs, pd.DataFrame):
+            self.resample_weighted_sample(min_size=min_size)
+
+        mpl.style.use('seaborn')
+
+        bar_width = 0.1
+        colors = ['green', 'blue']
+
+        fig, ax = plt.subplots(2, 1)
+
+        lang_1, lang_2 = self.langs_for_postprocess[self.city][:2]
+
+        for i, xlabels, ylabel in zip(range(2),
+                                      [['median_follower', 'mean_follower'],
+                                       ['majority_of_tweets_in_lang', 'half_of_tweets_in_lang']],
+                                       ['fraction of tweets', 'percentage of users, %']):
+
+            data = self.weighted_samples_distribs[lang_1]
+            data = data.values[:, :2] if not i else data.values[:, 2:]
+            plot_data = ax[i].boxplot(data, positions=np.arange(2) - 0.1, widths=bar_width,
+                                      patch_artist=True, medianprops=dict(linewidth=2, color='black'),
+                                      labels=xlabels, whis=[1, 99])
+            plt.setp(plot_data['boxes'][0], color=colors[0])
+            plt.setp(plot_data['boxes'][1], color=colors[0])
+
+            data = self.weighted_samples_distribs[lang_2]
+            data = data.values[:, :2] if not i else data.values[:, 2:]
+            plot_data = ax[i].boxplot(data, positions=np.arange(2) + 0.1, widths=bar_width,
+                                      patch_artist=True, labels=xlabels,
+                                      medianprops=dict(linewidth=2, color='black'), whis=[1, 99])
+            plt.setp(plot_data['boxes'][0], color=colors[1])
+            plt.setp(plot_data['boxes'][1], color=colors[1])
+
+            ax[i].set_ylabel(ylabel)
+            ax[i].xaxis.grid(False)
+            ax[i].yaxis.grid(linestyle='--', alpha=0.5)
+
+        # draw temporary red and blue lines and use them to create a legend
+        for i in range(2):
+            ax[i].plot([], c=colors[0], label=self.langs_for_postprocess[self.city][0])
+            ax[i].plot([], c=colors[1], label=self.langs_for_postprocess[self.city][1])
+            ax[i].legend(loc='best')
+
+        fig.suptitle("Distributions of statistics of {} Twitter users".format(self.city),
+                     fontsize=12, family='serif')
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        fig_name = 'weighted_sample_indicators_distribs_in_{}'.format(self.city)
+        plt.savefig(os.path.join(self.city, 'figures', fig_name))
+        plt.show()
+
+    def __repr__(self):
+        return "_".join([type(self).__name__, self.city])
 
 
-class PlotTweetData(RandomWalkCityTweets):
+class InterCityComparison:
 
-    def __init__(self, data_file_name, city):
-        super().__init__(data_file_name, city)
-
-
-class StreamTweetData:
-    pass
-
-class ProcessTweetData:
-    pass
-
-class PlotTweetData:
-    pass
-
-
-class DataComparison:
-
-    def compare_accs_distrib(self, accs_dict):
-
+    def __init__(self, cities, filename='city_random_walks.h5'):
         """
             Method to compare data from accounts of different cities
             Args:
-                * accs_dict: dictionary. Keys are strings of account names, values are cities accounts are linked to
+                * cities: tuple or list of strings. Strings are city names
         """
-        cities = set(accs_dict.values())
+        self.city_objects = {}
         for city in cities:
-            RandomWalkCityTweets('city_random_walks.h5', city)
+            data_path = os.path.join('data', filename)
+            self.city_objects[city] = PlotTweetData(data_path, city)
 
-            # data = self.data_stats[self.data_stats[account]]
+        mpl.rcParams['figure.figsize'] = (15, 10)
+
+    def compare_plot_boxes(self, root_accs, lang_ix=0):
+        """
+            Compare distributions for a given language of followers of accounts from different cities
+            Plots both boxplots and Cumulative Distribution Functions to visualize differences in
+            distributions
+            Args:
+                * root_accs: tuple or list of strings. Strings are root account names
+        """
+
+        self.data_accs = {}
+        self.langs = {}
+
+        # process data
+        data_to_plot = []
+        for acc in root_accs:
+            # find city account belongs to
+            for city in self.city_objects:
+                if acc in self.city_objects[city].av_acc_nodes:
+                    acc_city = city
+                    break
+            self.langs[acc_city] = self.city_objects[acc_city].langs_for_postprocess[acc_city][lang_ix]
+            key = self.langs[acc_city] + '_mean'
+            bool_idx = self.city_objects[acc_city].data_stats[acc]
+            self.data_accs[acc] = self.city_objects[acc_city].data_stats[bool_idx][key].values
+            data_to_plot.append(self.data_accs[acc])
+
+        # plot data
+        mpl.style.use('seaborn')
+        fig, (ax, ax2) = plt.subplots(2, 1, sharex=True)
+        colors, alpha = ['green', 'blue'], 0.7
+        box_width = 0.4
+        box_pos = np.arange(len(root_accs))
+        # define boxplots
+        bplot = ax.boxplot(data_to_plot, positions=box_pos, widths=box_width,
+                           boxprops=dict(linewidth=2, color='black'), vert=False,
+                           showmeans=True, medianprops=dict(linewidth=2, color='black'),
+                           meanprops=dict(marker="^", markerfacecolor="red", markersize=8),
+                           patch_artist=True)
+        # color boxes
+        for patch, color in zip(bplot['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(alpha)
+
+        ax.xaxis.grid(True, linestyle='--', alpha=alpha)
+        ax.yaxis.grid(False)
+        labels_font_size = 10
+        ax.set_yticks(box_pos)
+        # box labels
+        tlabs = [acc + '\n ({})'.format(lang[1]) for acc, lang in zip(root_accs, self.langs.items())]
+        ax.set_yticklabels(tlabs, rotation=45, fontsize=labels_font_size)
+        ax.tick_params(axis='y', which='major', labelsize=labels_font_size)
+        ax.plot(0.9, 1.4, "^", markersize=8, color='red')
+        ax.text(0.92, 1.36, "mean")
+        accs = ['@{}'.format(acc) for acc in root_accs]
+        ax.set_title('Language choice distributions from followers of {} accounts'.format(', '.join(accs)),
+                      family='serif', fontsize=10)
+
+        # plot CDFs
+        num_bins=20
+        for data, color, acc, (city, lang) in zip(data_to_plot, colors, root_accs, self.langs.items()):
+            # key = '{}_mean'.format(lang)
+            # plot_data = 100 * data[key]
+            ax2.hist(data, bins=num_bins, normed=True, histtype='step',
+                     color=color, cumulative=1, alpha=1, label='@{}({})'.format(acc, lang))
+        ax2.set_xlabel('fraction of tweets in lang', fontsize=labels_font_size)
+        ax2.set_ylabel('cumulative fraction of followers')
+        ax2.grid(True, linestyle='--', alpha=alpha)
+        ax2.legend(loc='lower right')
+
+        fig.tight_layout()
+        fig.subplots_adjust(hspace=0.025, wspace=0.025)
+        # save figure
+        fig_name = 'Language choice distributions from followers of {} accounts'.format(', '.join(accs))
+        plt.savefig(os.path.join(acc_city, 'figures', fig_name))
+
+
+
+
+
+
+
 
 
