@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import tweepy
 from tweepy import OAuthHandler
 # import secret codes to access Twitter API
-from twitter_pwd import access_token, access_token_secret, consumer_key, consumer_secret
+from .twitter_pwd import access_token, access_token_secret, consumer_key, consumer_secret
 
 # language detection
 from langdetect import detect
@@ -30,7 +30,7 @@ import pyprind
 
 class StreamTweetData:
     """ 
-        Get tweets from random relevant followers that live in a given city
+        Class to download tweets from random relevant followers that live in a given city
         and return data on language use 
     """
 
@@ -283,7 +283,8 @@ class StreamTweetData:
                 df_tweets.to_hdf(self.data_file_name,
                                  '/'.join(['', self.city, 'tweets_from_followers']))
             else:
-                with pd.HDFStore('city_random_walks.h5') as f:
+                data_path = os.path.join('data', 'city_random_walks.h5')
+                with pd.HDFStore(data_path) as f:
                     nodes = f.keys()
                 ixs_saved_walks = []
                 pattern = r"".join([self.city, "/random_walk_", "(\d+)"])
@@ -474,12 +475,14 @@ class StreamTweetData:
             Method to rewrite hdf data file in order to optimize file size.
             It creates a new file and deletes old one. It keeps original file name
         """
-        with pd.HDFStore(self.data_file_name) as f:
+        data_path = os.path.join('data', self.data_file_name)
+        with pd.HDFStore(data_path) as f:
+            new_data_path = os.path.join('data', 'new_city_random_walks.h5')
             for n in f.keys():
                 data = pd.read_hdf(f, n)
-                data.to_hdf('new_city_random_walks.h5', n)
-        os.remove(self.data_file_name)
-        os.rename('new_city_random_walks.h5', self.data_file_name)
+                data.to_hdf(new_data_path, n)
+        os.remove(data_path)
+        os.rename(new_data_path, self.data_file_name)
 
 
 class ProcessTweetData(StreamTweetData):
@@ -697,7 +700,8 @@ class ProcessTweetData(StreamTweetData):
         acc_data = defaultdict(dict)
         for root_acc in self.av_acc_nodes:
             node = "/".join([self.city, root_acc, 'followers'])
-            df = pd.read_hdf('city_random_walks.h5', node)
+            data_path = os.path.join('data', 'city_random_walks.h5')
+            df = pd.read_hdf(data_path, node)
             if city_only:
                 df = df[df.location.str.contains("|".join(self.key_words[self.city]['city']))]
             counts = df.lang.value_counts()
@@ -797,6 +801,8 @@ class ProcessTweetData(StreamTweetData):
         # residents ( divide by num of residents of the account with the least residents)
         sample_size_per_acc = self.compute_sample_size_per_acc(min_size=min_size,
                                                                use_obs_weight=use_obs_weight)
+        if not hasattr(self, 'sample_size_per_root_acc'):
+            self.load_sample_size_per_root_acc()
         av_sample_size_per_acc = pd.Series(self.sample_size_per_root_acc)
         # define convenience dataframe for iteration purposes
         df = pd.concat([sample_size_per_acc, av_sample_size_per_acc], axis=1)
@@ -918,15 +924,15 @@ class ProcessTweetData(StreamTweetData):
 
     def resample_weighted_sample(self, num_w_samps=100, num_props_samps=100, min_size=100, n=40):
         """
-            Method to simulate (num_w_samps * num_props_samps) random samples
+            Method to simulate (num_resid_props_samples * num_lang_props_samples) random samples
             of the weighted distribution of language proportions.
             For each user/followers and using the central limit theorem,
             observed lang proportions and their corresponding standard errors are used
-            as the parameters of normal distributions that allow to generate samples
-            from normal distributions both for each proportion and for each relevant lang.
+            as the parameters of normal distributions from which we can generate samples
+            both for each proportion and for each relevant lang.
 
             Account relative weights as well as language use proportions for each follower
-            are repeatedly sampled using normal approximation of sample mean
+            are repeatedly sampled using normal approximation of sample mean distribution.
 
             Observed lang proportions and their standard deviations are used
             to generate a normal distribution for each proportion and for each relevant lang
@@ -1407,6 +1413,7 @@ class PlotTweetData(ProcessTweetData):
         plt.show()
 
     def plot_weighted_sample_stats(self, min_size=25):
+        """ """
 
         if not isinstance(self.weighted_samples_distribs, pd.DataFrame):
             self.resample_weighted_sample(min_size=min_size)
@@ -1418,12 +1425,14 @@ class PlotTweetData(ProcessTweetData):
 
         fig, ax = plt.subplots(2, 1)
 
+        lang_1, lang_2 = self.langs_for_postprocess[self.city][:2]
+
         for i, xlabels, ylabel in zip(range(2),
                                       [['median_follower', 'mean_follower'],
                                        ['majority_of_tweets_in_lang', 'half_of_tweets_in_lang']],
                                        ['fraction of tweets', 'percentage of users, %']):
 
-            data = self.weighted_samples_distribs['ca']
+            data = self.weighted_samples_distribs[lang_1]
             data = data.values[:, :2] if not i else data.values[:, 2:]
             plot_data = ax[i].boxplot(data, positions=np.arange(2) - 0.1, widths=bar_width,
                                       patch_artist=True, medianprops=dict(linewidth=2, color='black'),
@@ -1431,7 +1440,7 @@ class PlotTweetData(ProcessTweetData):
             plt.setp(plot_data['boxes'][0], color=colors[0])
             plt.setp(plot_data['boxes'][1], color=colors[0])
 
-            data = self.weighted_samples_distribs['es']
+            data = self.weighted_samples_distribs[lang_2]
             data = data.values[:, :2] if not i else data.values[:, 2:]
             plot_data = ax[i].boxplot(data, positions=np.arange(2) + 0.1, widths=bar_width,
                                       patch_artist=True, labels=xlabels,
@@ -1470,7 +1479,8 @@ class InterCityComparison:
         """
         self.city_objects = {}
         for city in cities:
-            self.city_objects[city] = PlotTweetData(filename, city)
+            data_path = os.path.join('data', filename)
+            self.city_objects[city] = PlotTweetData(data_path, city)
 
         mpl.rcParams['figure.figsize'] = (15, 10)
 
